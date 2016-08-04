@@ -14,9 +14,8 @@
  * limitations under the License.
  */
 
-// Binary http_server exposes HTTP/GRPC interfaces for the search, xrefs, and
-// filetree services backed by either a combined serving table or a bare
-// GraphStore.
+// Binary http_server exposes HTTP/GRPC interfaces for the xrefs and filetree
+// services backed by either a combined serving table or a bare GraphStore.
 package main
 
 import (
@@ -26,14 +25,11 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"runtime"
 
 	"kythe.io/kythe/go/services/filetree"
 	"kythe.io/kythe/go/services/graphstore"
-	"kythe.io/kythe/go/services/search"
 	"kythe.io/kythe/go/services/xrefs"
 	ftsrv "kythe.io/kythe/go/serving/filetree"
-	srchsrv "kythe.io/kythe/go/serving/search"
 	xsrv "kythe.io/kythe/go/serving/xrefs"
 	"kythe.io/kythe/go/storage/gsutil"
 	"kythe.io/kythe/go/storage/leveldb"
@@ -41,12 +37,11 @@ import (
 	xstore "kythe.io/kythe/go/storage/xrefs"
 	"kythe.io/kythe/go/util/flagutil"
 
-	"github.com/bradfitz/http2"
 	"golang.org/x/net/context"
+	"golang.org/x/net/http2"
 	"google.golang.org/grpc"
 
 	ftpb "kythe.io/kythe/proto/filetree_proto"
-	spb "kythe.io/kythe/proto/storage_proto"
 	xpb "kythe.io/kythe/proto/xref_proto"
 
 	_ "kythe.io/kythe/go/services/graphstore/grpc"
@@ -70,11 +65,8 @@ var (
 )
 
 func init() {
-	if runtime.GOMAXPROCS(0) == 1 {
-		runtime.GOMAXPROCS(runtime.NumCPU())
-	}
 	gsutil.Flag(&gs, "graphstore", "GraphStore to serve xrefs")
-	flag.Usage = flagutil.SimpleUsage("Exposes HTTP/GRPC interfaces for the search, xrefs, and filetree services",
+	flag.Usage = flagutil.SimpleUsage("Exposes HTTP/GRPC interfaces for the xrefs and filetree services",
 		"(--graphstore spec | --serving_table path) [--listen addr] [--grpc_listen addr] [--public_resources dir]")
 }
 
@@ -95,20 +87,18 @@ func main() {
 	var (
 		xs xrefs.Service
 		ft filetree.Service
-		sr search.Service
 	)
 
 	ctx := context.Background()
 	if *servingTable != "" {
-		db, err := leveldb.Open(*servingTable, nil)
+		db, err := leveldb.Open(*servingTable, &leveldb.Options{MustExist: true})
 		if err != nil {
 			log.Fatalf("Error opening db at %q: %v", *servingTable, err)
 		}
 		defer db.Close()
 		tbl := table.ProtoBatchParallel{&table.KVProto{db}}
 		xs = xsrv.NewCombinedTable(tbl)
-		ft = &ftsrv.Table{tbl}
-		sr = &srchsrv.Table{&table.KVInverted{db}}
+		ft = &ftsrv.Table{Proto: tbl, PrefixedKeys: true}
 	} else {
 		log.Println("WARNING: serving directly from a GraphStore can be slow; you may want to use a --serving_table")
 		if f, ok := gs.(filetree.Service); ok {
@@ -132,23 +122,12 @@ func main() {
 			xs = xstore.NewGraphStoreService(gs)
 		}
 
-		if s, ok := gs.(search.Service); ok {
-			log.Printf("Using %T directly as search service", gs)
-			sr = s
-		}
-	}
-
-	if sr == nil {
-		log.Println("Search API not supported")
 	}
 
 	if *grpcListeningAddr != "" {
 		srv := grpc.NewServer()
 		xpb.RegisterXRefServiceServer(srv, xs)
 		ftpb.RegisterFileTreeServiceServer(srv, ft)
-		if sr != nil {
-			spb.RegisterSearchServiceServer(srv, sr)
-		}
 		go startGRPC(srv)
 	}
 
@@ -163,9 +142,6 @@ func main() {
 
 		xrefs.RegisterHTTPHandlers(ctx, xs, apiMux)
 		filetree.RegisterHTTPHandlers(ctx, ft, apiMux)
-		if sr != nil {
-			search.RegisterHTTPHandlers(ctx, sr, apiMux)
-		}
 		if *publicResources != "" {
 			log.Println("Serving public resources at", *publicResources)
 			if s, err := os.Stat(*publicResources); err != nil {

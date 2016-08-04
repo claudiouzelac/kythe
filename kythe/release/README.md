@@ -33,13 +33,14 @@ extractors, and tools directly supported by the Kythe team.
    - write_tables             :: Processes a GraphStore into efficient serving tables for http_server
 
 # Dependencies
- - Java JDK >=7
+ - Java JDK >=8
  - libncurses
  - libuuid
 
 ## Debian Jessie Install
 
-    apt-get install openjdk-7-jdk libncurses5 libssl1.0.0
+    echo "deb http://http.debian.net/debian jessie-backports main" >> /etc/apt/sources.list
+    apt-get install openjdk-8-jdk libncurses5 libssl1.0.0
 
 # End-to-end Java Example
 
@@ -82,7 +83,9 @@ SERVING=/tmp/kythe_serving
 rm -rf "$SERVING"
 /opt/kythe/tools/write_tables --graphstore $GRAPHSTORE --out "$SERVING"
 
-# Launch Kythe's service APIs as an HTTP server on port 9898
+# Launch Kythe's service APIs as an HTTP server listening to only local
+# connections on port 9898.  Using `--listen :9898` instead will allow
+# connections from other networked machines.
 /opt/kythe/tools/http_server --serving_table "$SERVING" \
   --public_resources /opt/kythe/web/ui --listen localhost:9898
 
@@ -111,7 +114,7 @@ by the following environment variables:
     KYTHE_VNAMES: path to a JSON-encoded VNames configuration file.  See
         https://godoc.org/github.com/google/kythe/kythe/go/storage/vnameutil for
         more details on the file's format and
-        http://kythe.io/repo/kythe/data/vnames.json for an example.
+        https://kythe.io/repo/kythe/data/vnames.json for an example.
     KYTHE_CORPUS: the name of the corpus for all constructed VNames (only used if
         KYTHE_VNAMES is unset; defaults to "kythe")
 
@@ -126,9 +129,9 @@ this script and setting the following Maven options:
 
 Read `extractors/javac-wrapper.sh` for more details on its usage and see
 examples usages in the Docker images defined at
-http://kythe.io/repo/kythe/java/com/google/devtools/kythe/extractors/java/standalone/Dockerfile
+https://kythe.io/repo/kythe/java/com/google/devtools/kythe/extractors/java/standalone/Dockerfile
 and
-http://kythe.io/repo/kythe/java/com/google/devtools/kythe/extractors/java/maven/Dockerfile.
+https://kythe.io/repo/kythe/java/com/google/devtools/kythe/extractors/java/maven/Dockerfile.
 
 ### Examples:
 
@@ -137,7 +140,8 @@ http://kythe.io/repo/kythe/java/com/google/devtools/kythe/extractors/java/maven/
 
     mkdir -p "$KYTHE_OUTPUT_DIRECTORY"
 
-    java -jar extractors/javac_extractor.jar \
+    java -Xbootclasspath/p:extractors/javac_extractor.jar \
+      -jar extractors/javac_extractor.jar \
       -cp "${$(find third_party -name '*.jar' -printf '%p:')%:}" \
       $(find src/main -name '*.java')
 
@@ -147,7 +151,7 @@ http://kythe.io/repo/kythe/java/com/google/devtools/kythe/extractors/java/maven/
 
 `indexers/cxx_indexer` and `indexers/java_indexer.jar` analyze the .kindex files
 produced by the extractors and emit a stream of protobuf wire-encoded facts
-(entries) that conform to http://kythe.io/schema.  The output stream can be
+(entries) that conform to https://kythe.io/schema.  The output stream can be
 processed by many of the accompanying binaries in the tools/ directory.
 
 ### Examples

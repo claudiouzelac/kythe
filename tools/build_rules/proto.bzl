@@ -1,14 +1,17 @@
-load("go", "go_library")
+load("@//tools:build_rules/go.bzl", "go_library")
+
+standard_proto_path = "third_party/proto/src/"
+
+def go_package_name(go_prefix, label):
+  return "%s%s/%s" % (go_prefix.go_prefix, label.package, label.name)
 
 def _genproto_impl(ctx):
   proto_src_deps = [src.proto_src for src in ctx.attr.deps]
-  inputs, outputs, arguments = [ctx.file.src] + proto_src_deps, [], [
-      "--proto_path=.",
-      # Until we can do this correctly, we will assume any proto file may
-      # depend on a "builtin" protocol buffer under third_party/proto/src.
-      # TODO(shahms): Do this correctly.
-      "--proto_path=third_party/proto/src/",
-  ]
+  inputs, outputs, arguments = [ctx.file.src] + proto_src_deps, [], ["--proto_path=."]
+  for src in proto_src_deps:
+    if src.path.startswith(standard_proto_path):
+      arguments += ["--proto_path=" + standard_proto_path]
+      break
   if ctx.attr.gen_cc:
     outputs += [ctx.outputs.cc_hdr, ctx.outputs.cc_src]
     arguments += ["--cpp_out=" + ctx.configuration.genfiles_dir.path]
@@ -26,20 +29,26 @@ def _genproto_impl(ctx):
           "--plugin=protoc-gen-java_rpc=" + java_grpc_plugin.path,
           "--java_rpc_out=" + srcjar.path
       ]
-  go_package = ctx.attr.go_package
-  if not go_package:
-    go_package = "%s/%s" % (ctx.label.package, ctx.label.name)
+
+  go_package = go_package_name(ctx.attr._go_package_prefix, ctx.label)
   if ctx.attr.gen_go:
-    inputs += [ctx.executable._protoc_gen_go]
     outputs += [ctx.outputs.go_src]
     go_cfg = ["import_path=" + go_package, _go_import_path(ctx.attr.deps)]
     if ctx.attr.has_services:
       go_cfg += ["plugins=grpc"]
     genfiles_path = ctx.configuration.genfiles_dir.path
-    arguments += [
-        "--plugin=" + ctx.executable._protoc_gen_go.path,
-        "--go_out=%s:%s" % (",".join(go_cfg), genfiles_path)
-    ]
+    if ctx.attr.gofast:
+      inputs += [ctx.executable._protoc_gen_gofast]
+      arguments += [
+          "--plugin=" + ctx.executable._protoc_gen_gofast.path,
+          "--gofast_out=%s:%s" % (",".join(go_cfg), genfiles_path)
+      ]
+    else:
+      inputs += [ctx.executable._protoc_gen_go]
+      arguments += [
+          "--plugin=" + ctx.executable._protoc_gen_go.path,
+          "--golang_out=%s:%s" % (",".join(go_cfg), genfiles_path)
+      ]
 
   ctx.action(
       mnemonic = "GenProto",
@@ -55,7 +64,7 @@ def _genproto_impl(ctx):
         inputs = [srcjar],
         outputs = [ctx.outputs.java_src],
         arguments = [srcjar.path, ctx.outputs.java_src.path],
-        command = "mv $1 $2")
+        command = "cp $1 $2")
     # Fixup the resulting outputs to keep the source-only .jar out of the result.
     outputs += [ctx.outputs.java_src]
     outputs = [e for e in outputs if e != srcjar]
@@ -63,7 +72,6 @@ def _genproto_impl(ctx):
   return struct(files=set(outputs),
                 go_package=go_package,
                 proto_src=ctx.file.src)
-
 
 _genproto_attrs = {
     "src": attr.label(
@@ -75,22 +83,31 @@ _genproto_attrs = {
         providers = ["proto_src"],
     ),
     "has_services": attr.bool(),
+    "gofast": attr.bool(),
     "_protoc": attr.label(
         default = Label("//third_party/proto:protoc"),
         executable = True,
-        ),
+    ),
+    "_go_package_prefix": attr.label(
+        default = Label("//external:go_package_prefix"),
+        providers = ["go_prefix"],
+        allow_files = False,
+    ),
     "_protoc_gen_go": attr.label(
-        default = Label("//third_party/go:protoc-gen-go"),
+        default = Label("@go_protobuf//:protoc-gen-golang"),
         executable = True,
-        ),
+    ),
+    "_protoc_gen_gofast": attr.label(
+        default = Label("@go_gogo_protobuf//:protoc-gen-gofast"),
+        executable = True,
+    ),
     "_protoc_grpc_plugin_java": attr.label(
         default = Label("//third_party/grpc-java:plugin"),
         executable = True,
-        ),
+    ),
     "gen_cc": attr.bool(),
     "gen_java": attr.bool(),
     "gen_go": attr.bool(),
-    "go_package": attr.string(),
 }
 
 def _genproto_outputs(attrs):
@@ -110,33 +127,30 @@ def _genproto_outputs(attrs):
     }
   return outputs
 
-
 genproto = rule(
     _genproto_impl,
-    attrs=_genproto_attrs,
-    output_to_genfiles=True,
-    outputs=_genproto_outputs,
+    attrs = _genproto_attrs,
+    output_to_genfiles = True,
+    outputs = _genproto_outputs,
 )
 
 def proto_library(name, src=None, deps=[], visibility=None,
                   has_services=False,
                   gen_java=False, gen_go=False, gen_cc=False,
-                  go_package=None):
+                  gofast=True):
   if not src:
     if name.endswith("_proto"):
       src = name[:-6] + ".proto"
     else:
       src = name + ".proto"
-  if not go_package:
-    go_package = "kythe.io/" + PACKAGE_NAME + "/" + name
   proto_pkg = genproto(name=name,
                        src=src,
                        deps=deps,
                        has_services=has_services,
-                       go_package=go_package,
                        gen_java=gen_java,
                        gen_go=gen_go,
-                       gen_cc=gen_cc)
+                       gen_cc=gen_cc,
+                       gofast=gofast)
 
   # TODO(shahms): These should probably not be separate libraries, but
   # allowing upstream *_library and *_binary targets to depend on the
@@ -147,8 +161,8 @@ def proto_library(name, src=None, deps=[], visibility=None,
     java_deps = ["//third_party/proto:protobuf_java"]
     if has_services:
       java_deps += [
+          "//external:guava",
           "//third_party/grpc-java",
-          "//third_party/guava",
           "//third_party/jsr305_annotations:jsr305",
       ]
     for dep in deps:
@@ -161,11 +175,11 @@ def proto_library(name, src=None, deps=[], visibility=None,
     )
 
   if gen_go:
-    go_deps = ["//third_party/go:protobuf"]
+    go_deps = ["@go_protobuf//:proto"]
     if has_services:
       go_deps += [
-        "//third_party/go:context",
-        "//third_party/go:grpc",
+        "@go_x_net//:context",
+        "@go_grpc//:grpc",
       ]
     for dep in deps:
       go_deps += [dep + "_go"]
@@ -173,7 +187,7 @@ def proto_library(name, src=None, deps=[], visibility=None,
         name  = name + "_go",
         srcs = [proto_pkg.label()],
         deps = go_deps,
-        package = go_package,
+        multi_package = 1,
         visibility = visibility,
     )
 
@@ -190,9 +204,11 @@ def proto_library(name, src=None, deps=[], visibility=None,
         deps = cc_deps,
     )
 
-
 def _go_import_path(deps):
   import_map = {}
   for dep in deps:
-    import_map += {dep.proto_src.path: dep.go_package}
+    if dep.proto_src.path.startswith(standard_proto_path):
+      import_map += {dep.proto_src.path[len(standard_proto_path):]: dep.go_package}
+    else:
+      import_map += {dep.proto_src.path: dep.go_package}
   return ",".join(["M%s=%s" % i for i in import_map.items()])

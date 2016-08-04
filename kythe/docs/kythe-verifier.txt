@@ -20,6 +20,28 @@ for writing tests to check whether Kythe is correctly processing source text.
 Here we describe the *verifier*, a standalone component that checks that a
 *database* of Kythe facts supports a set of *goals*.
 
+== Recommended use
+
+For examples of tests that use the verifier, please see
+https://github.com/google/kythe/tree/master/kythe/cxx/indexer/cxx/testdata/basic[//kythe/cxx/indexer/cxx/testdata/basic]
+or https://github.com/google/kythe/tree/master/kythe/javatests/com/google/devtools/kythe/analyzers/java/testdata/pkg[//kythe/javatests/com/google/devtools/kythe/analyzers/java/testdata/pkg].
+It is best to keep the size of a single test small and to develop assertions
+while frequently checking the graph produced by `--annotated_graphviz`.
+
+Assuming that you have Kythe installed to `/opt/kythe`, you can start using
+the verifier on a $$C++$$ file right away:
+
+  /opt/kythe/indexers/cxx_indexer -i foo.cc -- -std=c++1y \
+      | /opt/kythe/tools/verifier foo.cc --annotated_graphviz > foo.dot
+  xdot foo.dot
+
+By default (and assuming no errors) you will see the Kythe graph for `foo.cc`.
+The remainder of this document discusses the kinds of assertions you can make
+about the nodes and edges in the graph.
+
+There is a https://kythe.io/docs/schema/verifierstyle.html[style guide] with
+some suggestions on how to write readable tests.
+
 == Basic well-formedness checks
 
 The verifier begins by checking that the input database obeys basic Kythe
@@ -39,13 +61,14 @@ future, they may be specified in a startup script.
 == Specifying goals
 
 Verification goals may be inlined into ordinary source text. Lines beginning
-with language-specific magic comments are treated as goals. For languages
-supporting BCPL-style // comments, these look like:
+with language-specific magic comments are treated as goals. By default, the
+verifier looks for goals in comments that start with `//-`:
 
   //- this-is-a-goal
 
 For languages supporting shell-style comments, like Python or text protobufs,
-instead use:
+instead use `#-` and tell the verifier to expect the different syntax using the
+`'--goal_prefix=#-'` flag:
 
   #- this-is-a-goal
 
@@ -181,6 +204,21 @@ specifications:
   #- AnchorX=@x.node/kind anchor
   #- AnchorX.loc/start @^+2x
   #- AnchorX.loc/end @$:4x
+
+==== Ambiguity
+
+In the usual case, it is an error if a location specifier has multiple matches:
+
+  #- @text defines SomeNode
+  text text
+
+It is not always possible to rewrite a test program to ensure unambiguous
+matches. In these situations, you can choose a particular match by adding its
+ordinal directly after the `@` of the specifier:
+
+  #- @#0text defines SomeNode
+  #- @#1text defines AnotherNode
+  text text
 
 === Edge goals
 
@@ -339,6 +377,12 @@ Passing the `--graphviz` flag will cause the verifier to ignore rule files
 and dump its fact database as a Kythe graph to standard out in graphviz format.
 Note that the database must still be well-formed according to the
 basic well-formedness checks described earlier.
+
+In contrast, the `--annotated_graphviz` flag will still attempt to satisfy
+all rules. If this is successful, it will dump a graph to standard out in
+graphviz format. In this graph, nodes used to satisfy rules will be colored
+blue; their labels will also contain the names of the EVars unified with their
+VNames.
 
 === Return code
 

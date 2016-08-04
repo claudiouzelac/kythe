@@ -20,7 +20,7 @@
             [ui.schema :as schema]
             [ui.service :as service]
             [ui.src :refer [src-view construct-decorations line-in-string]]
-            [ui.util :refer [handle-ch parse-url-state set-url-state ticket->vname]]
+            [ui.util :refer [handle-ch parse-url-state set-url-state ticket->vname vname->ticket]]
             [ui.xrefs :refer [xrefs-view]]))
 
 (defn- replace-state! [state key]
@@ -38,18 +38,11 @@
 
       ;; Restore page state based on URL initially given
       (let [state (parse-url-state)
-            file (select-keys state [:path :corpus :signature :root :language])]
+            file (select-keys state [:path :corpus :root])]
         (when-not (empty? file)
-          (service/get-search {:partial file
-                               :fact [{:name schema/node-kind-fact
-                                       :value "file"}]}
-            (fn [results]
-              (if (= 1 (count results))
-                (put! (om/get-state owner :file-to-view)
-                  (assoc (select-keys state [:offset :line])
-                    :ticket (first results)))
-                (.log js/console (str "Search results (" (count results) "): " (pr-str results)))))
-            #(.log js/console (str "Error searching: " %)))))
+          (put! (om/get-state owner :file-to-view)
+            (assoc (select-keys state [:offset :line])
+              :ticket (vname->ticket file)))))
 
       ;; Handle all jump requests to files and anchors within a file
       (handle-ch (om/get-state owner :file-to-view) nil
@@ -77,15 +70,15 @@
                                                           {:line scroll-to-line
                                                            :decorations decorations}))
                       (put! (om/get-state owner :hover) {:xref-jump anchor})))
-                  (replace-state! state :current-file)))
-              offset (do
-                      (set-url-state
-                        (assoc (ticket->vname ticket) :offset offset))
-                       (om/transact! state :current-file
-                         (fn [file]
-                           (assoc file
-                             :line (line-in-string (:source-text (:decorations file)) offset))))
-                       (put! (om/get-state owner :hover) {:xref-jump anchor})))
+                  #(om/transact! state :current-file (constantly (assoc % :requested-file ticket)))))
+              (or line offset)
+              (do
+                (set-url-state
+                  (assoc (ticket->vname ticket) :offset offset :line line))
+                (om/transact! state :current-file
+                  (fn [file]
+                    (assoc file :line (or line (line-in-string (:source-text (:decorations file)) offset)))))
+                (put! (om/get-state owner :hover) {:xref-jump anchor})))
             ticket)))
 
       ;; Handle all requests for the xrefs pane
@@ -94,24 +87,23 @@
           (let [target (if (:ticket target) target {:ticket target})
                 page-token (:page_token target)]
             (om/transact! state :current-xrefs #(assoc % :loading (:ticket target)))
-            (service/get-edges (:ticket target) target
-              (fn [edges]
-                (let [edges (assoc edges :edge_set (first (:edge_set edges)))]
-                  (om/transact! state :current-xrefs
-                    (fn [prev]
-                      (let [prev-pages (if (= (:source_ticket (:edge_set prev)) (:source_ticket (:edge_set edges)))
-                                         (:pages prev)
-                                         [])]
-                        (assoc edges :current-page-token page-token
-                          :pages
-                          (cond
-                            (not (:next edges)) prev-pages
-                            (and page-token (= (last prev-pages) page-token))
-                            (conj prev-pages (:next edges))
-                            (some #{(:next edges)} prev-pages)
-                            prev-pages
-                            :else
-                            [(:next edges)])))))))
+            (service/get-xrefs (:ticket target) target
+              (fn [xrefs]
+                (om/transact! state :current-xrefs
+                  (fn [prev]
+                    (let [prev-pages (if (= (:ticket (:cross-references prev)) (:ticket (:cross-references xrefs)))
+                                       (:pages prev)
+                                       [])]
+                      (assoc xrefs :current-page-token page-token
+                        :pages
+                        (cond
+                          (not (:next xrefs)) prev-pages
+                          (and page-token (= (last prev-pages) page-token))
+                          (conj prev-pages (:next xrefs))
+                          (some #{(:next xrefs)} prev-pages)
+                          prev-pages
+                          :else
+                          [(:next xrefs)]))))))
               (replace-state! state :current-xrefs)))))
 
       ;; Populate the initial filetree data
@@ -136,6 +128,7 @@
             {:init-state {:file-to-view file-to-view}})
           (om/build src-view (:current-file state)
             {:init-state {:xrefs-to-view xrefs-to-view
+                          :file-to-view file-to-view
                           :hover hover}}))
         (om/build xrefs-view (:current-xrefs state)
           {:init-state {:xrefs-to-view xrefs-to-view

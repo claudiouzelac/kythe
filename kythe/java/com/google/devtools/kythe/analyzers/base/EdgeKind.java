@@ -21,25 +21,28 @@ public enum EdgeKind {
   DEFINES(true, "defines"),
   DEFINES_BINDING(true, "defines/binding"),
   DOCUMENTS(true, "documents"),
+
   REF(true, "ref"),
+  REF_CALL(true, "ref/call"),
   REF_DOC(true, "ref/doc"),
+  REF_IMPORTS(true, "ref/imports"),
 
   ANNOTATED_BY("annotatedby"),
   BOUNDED_LOWER("bounded/lower"),
   BOUNDED_UPPER("bounded/upper"),
   CHILDOF("childof"),
   EXTENDS("extends"),
-  IMPLEMENTS("implements"),
   NAMED("named"),
   OVERRIDES("overrides"),
   OVERRIDES_TRANSITIVE("overrides/transitive"),
   PARAM("param"),
   TYPED("typed");
 
-  private  static final String EDGE_PREFIX = "/kythe/edge/";
+  private static final String EDGE_PREFIX = "/kythe/edge/";
 
   private final boolean isAnchorEdge;
   private final String kind;
+
   EdgeKind(boolean isAnchorEdge, String kind) {
     this.isAnchorEdge = isAnchorEdge;
     this.kind = EDGE_PREFIX + kind;

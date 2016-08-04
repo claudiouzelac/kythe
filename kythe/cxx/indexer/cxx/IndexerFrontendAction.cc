@@ -21,18 +21,18 @@
 #include <memory>
 #include <string>
 
-#include "clang/Frontend/FrontendAction.h"
-#include "clang/Tooling/Tooling.h"
+#include "kythe/cxx/common/indexing/KytheClaimClient.h"
+#include "kythe/cxx/common/indexing/KytheGraphRecorder.h"
+#include "kythe/cxx/common/indexing/KytheVFS.h"
 #include "kythe/cxx/common/json_proto.h"
 #include "kythe/proto/analysis.pb.h"
 #include "kythe/proto/cxx.pb.h"
 #include "third_party/llvm/src/clang_builtin_headers.h"
+#include "clang/Frontend/FrontendAction.h"
+#include "clang/Tooling/Tooling.h"
 #include "llvm/ADT/Twine.h"
 
-#include "KytheClaimClient.h"
 #include "KytheGraphObserver.h"
-#include "KytheGraphRecorder.h"
-#include "KytheVFS.h"
 
 namespace kythe {
 
@@ -58,20 +58,7 @@ bool DecodeHeaderSearchInformation(const proto::CompilationUnit &Unit,
   if (!FoundDetails) {
     return false;
   }
-  const auto &InfoProto = Details.header_search_info();
-  Info.angled_dir_idx = InfoProto.first_angled_dir();
-  Info.system_dir_idx = InfoProto.first_system_dir();
-  for (const auto &Dir : InfoProto.dir()) {
-    Info.paths.emplace_back(Dir.path(),
-                            static_cast<clang::SrcMgr::CharacteristicKind>(
-                                Dir.characteristic_kind()));
-  }
-  for (const auto &Prefix : Details.system_header_prefix()) {
-    Info.system_prefixes.emplace_back(Prefix.prefix(),
-                                      Prefix.is_system_header());
-  }
-  if (!(Info.angled_dir_idx <= Info.system_dir_idx &&
-        Info.system_dir_idx <= Info.paths.size())) {
+  if (!Info.CopyFrom(Details)) {
     fprintf(stderr,
             "Warning: unit has header search info, but it is ill-formed.\n");
     return false;
@@ -97,13 +84,11 @@ std::string ConfigureSystemHeaders(const proto::CompilationUnit &Unit,
 } // anonymous namespace
 
 std::string IndexCompilationUnit(const proto::CompilationUnit &Unit,
-                                 const std::string &EffectiveWorkingDirectory,
                                  std::vector<proto::FileData> &Files,
                                  KytheClaimClient &Client, HashCache *Cache,
-                                 BehaviorOnTemplates BOT,
-                                 BehaviorOnUnimplemented BOU,
-                                 bool AllowFSAccess,
-                                 KytheOutputStream &Output) {
+                                 KytheOutputStream &Output,
+                                 const IndexerOptions &Options,
+                                 const MetadataSupports *MetaSupports) {
   HeaderSearchInfo HSI;
   bool HSIValid = DecodeHeaderSearchInformation(Unit, HSI);
   std::string FixupArgument;
@@ -111,16 +96,26 @@ std::string IndexCompilationUnit(const proto::CompilationUnit &Unit,
     FixupArgument = ConfigureSystemHeaders(Unit, Files);
   }
   clang::FileSystemOptions FSO;
-  FSO.WorkingDir = EffectiveWorkingDirectory;
-  llvm::IntrusiveRefCntPtr<IndexVFS> VFS(new IndexVFS(FSO.WorkingDir, Files));
+  FSO.WorkingDir = Options.EffectiveWorkingDirectory;
+  std::vector<llvm::StringRef> Dirs;
+  for (auto &Path : HSI.paths) {
+    Dirs.push_back(Path.path);
+  }
+  llvm::IntrusiveRefCntPtr<IndexVFS> VFS(
+      new IndexVFS(FSO.WorkingDir, Files, Dirs));
   KytheGraphRecorder Recorder(&Output);
-  KytheGraphObserver Observer(&Recorder, &Client, VFS);
+  KytheGraphObserver Observer(&Recorder, &Client, MetaSupports, VFS,
+                              Options.ReportProfileEvent);
   if (Cache != nullptr) {
     Output.UseHashCache(Cache);
     Observer.StopDeferringNodes();
   }
+  if (Options.DropInstantiationIndependentData) {
+    Observer.DropRedundantWraiths();
+  }
   Observer.set_claimant(Unit.v_name());
   Observer.set_starting_context(Unit.entry_context());
+  Observer.set_lossy_claiming(Options.EnableLossyClaiming);
   for (const auto &Input : Unit.required_input()) {
     if (Input.has_info() && !Input.info().path().empty() &&
         Input.has_v_name()) {
@@ -142,10 +137,11 @@ std::string IndexCompilationUnit(const proto::CompilationUnit &Unit,
   }
   std::unique_ptr<IndexerFrontendAction> Action(
       new IndexerFrontendAction(&Observer, HSIValid ? &HSI : nullptr));
-  Action->setIgnoreUnimplemented(BOU);
-  Action->setTemplateMode(BOT);
+  Action->setIgnoreUnimplemented(Options.UnimplementedBehavior);
+  Action->setTemplateMode(Options.TemplateBehavior);
+  Action->setVerbosity(Options.Verbosity);
   llvm::IntrusiveRefCntPtr<clang::FileManager> FileManager(
-      new clang::FileManager(FSO, AllowFSAccess ? nullptr : VFS));
+      new clang::FileManager(FSO, Options.AllowFSAccess ? nullptr : VFS));
   std::vector<std::string> Args(Unit.argument().begin(), Unit.argument().end());
   Args.insert(Args.begin() + 1, "-fsyntax-only");
   Args.insert(Args.begin() + 1, "-w");
@@ -158,7 +154,8 @@ std::string IndexCompilationUnit(const proto::CompilationUnit &Unit,
   // ToolInvocation doesn't take ownership of ToolActions.
   clang::tooling::ToolInvocation Invocation(
       Args, Tool.get(), FileManager.get(),
-      std::make_shared<clang::RawPCHContainerOperations>());
+      std::make_shared<clang::PCHContainerOperations>());
+  ProfileBlock block(Observer.getProfilingCallback(), "run_invocation");
   if (!Invocation.run()) {
     return "Errors during indexing.";
   }

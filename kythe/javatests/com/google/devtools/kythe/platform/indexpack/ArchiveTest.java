@@ -16,8 +16,6 @@
 
 package com.google.devtools.kythe.platform.indexpack;
 
-import com.google.common.collect.Maps;
-import com.google.common.collect.Sets;
 import com.google.common.hash.HashFunction;
 import com.google.common.hash.Hashing;
 import com.google.devtools.kythe.extractors.shared.CompilationDescription;
@@ -27,31 +25,34 @@ import com.google.devtools.kythe.proto.Analysis.FileInfo;
 import com.google.devtools.kythe.proto.Storage.VName;
 import com.google.devtools.kythe.util.DeleteRecursively;
 import com.google.protobuf.ByteString;
-
-import junit.framework.TestCase;
-
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import junit.framework.TestCase;
 
 /** This class tests {@link Archive}. */
 public class ArchiveTest extends TestCase {
 
   private static final HashFunction DIGEST_FUNCTION = Hashing.sha256();
-  private static final CompilationDescription[] TEST_COMPILATIONS = new CompilationDescription[] {
-    compilation(vname("signature", "corpus", "language"),
-        file("file1", "contents1"),
-        file("file2", "contents2")),
-    compilation(vname("another_compilation", "", "java"),
-        file("file", "contents1"),
-        file("some/other/file", "contents1"),
-        file("some/empty/file", ""))
-  };
+  private static final CompilationDescription[] TEST_COMPILATIONS =
+      new CompilationDescription[] {
+        compilation(
+            vname("signature", "corpus", "language"),
+            file("file1", "contents1"),
+            file("file2", "contents2")),
+        compilation(
+            vname("another_compilation", "", "java"),
+            file("file", "contents1"),
+            file("some/other/file", "contents1"),
+            file("some/empty/file", ""))
+      };
 
   private Archive archive;
 
@@ -85,7 +86,7 @@ public class ArchiveTest extends TestCase {
   public void testWriteUnit() throws IOException {
     String key1 = archive.writeUnit("test", new Object());
     assertNotNull(key1);
-    Map<String, String> map = Maps.newHashMap();
+    Map<String, String> map = new HashMap<>();
     map.put("something", "else");
     String key2 = archive.writeUnit("test", map);
     assertNotNull(key2);
@@ -131,7 +132,7 @@ public class ArchiveTest extends TestCase {
   }
 
   public void testReadUnits_compilationUnit() throws IOException {
-    Set<CompilationUnit> toRead = Sets.newHashSet();
+    Set<CompilationUnit> toRead = new HashSet<>();
     for (CompilationDescription desc : TEST_COMPILATIONS) {
       archive.writeUnit(desc.getCompilationUnit());
       toRead.add(desc.getCompilationUnit());
@@ -154,7 +155,7 @@ public class ArchiveTest extends TestCase {
   }
 
   public void testReadDescriptions() throws IOException {
-    Set<CompilationDescription> toRead = Sets.newHashSet();
+    Set<CompilationDescription> toRead = new HashSet<>();
     for (CompilationDescription desc : TEST_COMPILATIONS) {
       archive.writeDescription(desc);
       toRead.add(desc);
@@ -171,17 +172,14 @@ public class ArchiveTest extends TestCase {
   }
 
   private static byte[] createTestData(int i) {
-    return (""+(""+i).intern().hashCode()).getBytes(Archive.DATA_CHARSET);
+    return ("" + ("" + i).intern().hashCode()).getBytes(Archive.DATA_CHARSET);
   }
 
   private static FileData file(String path, String contents) {
     byte[] data = contents.getBytes(Archive.DATA_CHARSET);
     String digest = DIGEST_FUNCTION.hashBytes(data).toString();
     return FileData.newBuilder()
-        .setInfo(FileInfo.newBuilder()
-            .setPath(path)
-            .setDigest(digest)
-            .build())
+        .setInfo(FileInfo.newBuilder().setPath(path).setDigest(digest).build())
         .setContent(ByteString.copyFrom(data))
         .build();
   }
@@ -191,10 +189,11 @@ public class ArchiveTest extends TestCase {
     List<FileData> fileList = Arrays.asList(files);
     for (FileData file : fileList) {
       String path = file.getInfo().getPath();
-      unit.addRequiredInput(CompilationUnit.FileInput.newBuilder()
-          .setVName(VName.newBuilder().setPath(path))
-          .setInfo(file.getInfo())
-          .build());
+      unit.addRequiredInput(
+          CompilationUnit.FileInput.newBuilder()
+              .setVName(VName.newBuilder().setPath(path))
+              .setInfo(file.getInfo())
+              .build());
       unit.addSourceFile(path);
     }
     return new CompilationDescription(unit.build(), fileList);

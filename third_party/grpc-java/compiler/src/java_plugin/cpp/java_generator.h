@@ -27,19 +27,23 @@ class LogHelper {
 
 // Abort the program after logging the mesage if the given condition is not
 // true. Otherwise, do nothing.
-#define CHECK(x) !(x) && LogHelper(&std::cerr, true).get_os() \
+#define GRPC_CODEGEN_CHECK(x) !(x) && LogHelper(&std::cerr, true).get_os() \
                              << "CHECK FAILED: " << __FILE__ << ":" \
                              << __LINE__ << ": "
 
 // Abort the program after logging the mesage.
-#define FAIL CHECK(false)
+#define GRPC_CODEGEN_FAIL GRPC_CODEGEN_CHECK(false)
 
 using namespace std;
 
 namespace java_grpc_generator {
 
+enum ProtoFlavor {
+  NORMAL, LITE, NANO
+};
+
 // Returns the package name of the gRPC services defined in the given file.
-string ServiceJavaPackage(const google::protobuf::FileDescriptor* file);
+string ServiceJavaPackage(const google::protobuf::FileDescriptor* file, bool nano);
 
 // Returns the name of the outer class that wraps in all the generated code for
 // the given service.
@@ -48,7 +52,8 @@ string ServiceClassName(const google::protobuf::ServiceDescriptor* service);
 // Writes the generated service interface into the given ZeroCopyOutputStream
 void GenerateService(const google::protobuf::ServiceDescriptor* service,
                      google::protobuf::io::ZeroCopyOutputStream* out,
-                     bool generate_nano);
+                     ProtoFlavor flavor,
+                     bool enable_deprecated);
 
 }  // namespace java_grpc_generator
 

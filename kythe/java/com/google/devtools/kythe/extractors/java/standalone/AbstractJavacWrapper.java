@@ -17,11 +17,11 @@
 package com.google.devtools.kythe.extractors.java.standalone;
 
 import com.google.common.base.Joiner;
+import com.google.common.base.Splitter;
 import com.google.common.base.Strings;
 import com.google.common.base.Throwables;
 import com.google.common.collect.Lists;
 import com.google.common.hash.Hashing;
-import com.google.common.io.Files;
 import com.google.devtools.kythe.extractors.java.JavaCompilationUnitExtractor;
 import com.google.devtools.kythe.extractors.shared.CompilationDescription;
 import com.google.devtools.kythe.extractors.shared.FileVNames;
@@ -29,10 +29,10 @@ import com.google.devtools.kythe.extractors.shared.IndexInfoUtils;
 import com.google.devtools.kythe.platform.indexpack.Archive;
 import com.google.devtools.kythe.proto.Analysis.CompilationUnit;
 import com.google.devtools.kythe.proto.Analysis.FileData;
-
+import com.sun.tools.javac.main.CommandLine;
 import java.io.File;
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
@@ -40,7 +40,7 @@ import java.util.List;
 /**
  * General logic for a javac-based {@link CompilationUnit} extractor.
  *
- * Environment Variables Used:
+ * Environment Variables Used (note that these can also be set as JVM system properties):
  *   KYTHE_VNAMES: optional path to a JSON configuration file for {@link FileVNames} to populate
  *                 the {@link CompilationUnit}'s required input {@link VName}s
  *
@@ -50,6 +50,9 @@ import java.util.List;
  *   KYTHE_ROOT_DIRECTORY: required root path for file inputs; the {@link FileData} paths stored in
  *                         the {@link CompilationUnit} will be made to be relative to this directory
  *
+ *   KYTHE_OUTPUT_FILE: if set to a non-empty value, write the resulting .kindex file to this path
+ *                      instead of using KYTHE_OUTPUT_DIRECTORY
+ *
  *   KYTHE_OUTPUT_DIRECTORY: required directory path to store the resulting .kindex file
  *
  *   KYTHE_INDEX_PACK: if set to a non-empty value, interpret KYTHE_OUTPUT_DIRECTORY as the root of
@@ -58,13 +61,15 @@ import java.util.List;
 public abstract class AbstractJavacWrapper {
   public static final String DEFAULT_CORPUS = "kythe";
 
-  protected abstract CompilationDescription processCompilation(String[] arguments,
-      JavaCompilationUnitExtractor javaCompilationUnitExtractor) throws Exception;
+  protected abstract CompilationDescription processCompilation(
+      String[] arguments, JavaCompilationUnitExtractor javaCompilationUnitExtractor)
+      throws Exception;
+
   protected abstract void passThrough(String[] args) throws Exception;
 
   /**
    * Given the command-line arguments to javac, construct a {@link CompilationUnit} and write it to
-   * a .kindex file or indexpack.  Parameters to the extraction logic are passed by environment
+   * a .kindex file or indexpack. Parameters to the extraction logic are passed by environment
    * variables (see class comment).
    */
   public void process(String[] args) {
@@ -75,38 +80,46 @@ public abstract class AbstractJavacWrapper {
         if (Strings.isNullOrEmpty(vnamesConfig)) {
           String corpus = readEnvironmentVariable("KYTHE_CORPUS", DEFAULT_CORPUS);
           extractor =
-              new JavaCompilationUnitExtractor(corpus,
-                  readEnvironmentVariable("KYTHE_ROOT_DIRECTORY"));
+              new JavaCompilationUnitExtractor(
+                  corpus, readEnvironmentVariable("KYTHE_ROOT_DIRECTORY"));
         } else {
           extractor =
-              new JavaCompilationUnitExtractor(FileVNames.fromFile(vnamesConfig),
+              new JavaCompilationUnitExtractor(
+                  FileVNames.fromFile(vnamesConfig),
                   readEnvironmentVariable("KYTHE_ROOT_DIRECTORY"));
         }
 
         CompilationDescription indexInfo =
             processCompilation(getCleanedUpArguments(args), extractor);
 
-        String outputDir = readEnvironmentVariable("KYTHE_OUTPUT_DIRECTORY");
-        if (Strings.isNullOrEmpty(System.getenv("KYTHE_INDEX_PACK"))) {
-          writeIndexInfoToFile(outputDir, indexInfo);
+        String outputFile = System.getenv("KYTHE_OUTPUT_FILE");
+        if (!Strings.isNullOrEmpty(outputFile)) {
+          IndexInfoUtils.writeIndexInfoToFile(indexInfo, outputFile);
         } else {
-          new Archive(outputDir).writeDescription(indexInfo);
+          String outputDir = readEnvironmentVariable("KYTHE_OUTPUT_DIRECTORY");
+          if (Strings.isNullOrEmpty(System.getenv("KYTHE_INDEX_PACK"))) {
+            writeIndexInfoToFile(outputDir, indexInfo);
+          } else {
+            new Archive(outputDir).writeDescription(indexInfo);
+          }
         }
 
         CompilationUnit compilationUnit = indexInfo.getCompilationUnit();
-        if(compilationUnit.getHasCompileErrors()) {
+        if (compilationUnit.getHasCompileErrors()) {
           System.err.println("Errors encountered during compilation");
           System.exit(1);
         }
       }
     } catch (IOException e) {
-      System.err.println(String.format(
-          "Unexpected IO error (probably while writing to index file): %s", e.toString()));
+      System.err.println(
+          String.format(
+              "Unexpected IO error (probably while writing to index file): %s", e.toString()));
       System.err.println(Throwables.getStackTraceAsString(e));
       System.exit(2);
     } catch (Exception e) {
-      System.err.println(String.format(
-          "Unexpected error compiling and indexing java compilation: %s", e.toString()));
+      System.err.println(
+          String.format(
+              "Unexpected error compiling and indexing java compilation: %s", e.toString()));
       System.err.println(Throwables.getStackTraceAsString(e));
       System.exit(2);
     }
@@ -114,17 +127,7 @@ public abstract class AbstractJavacWrapper {
 
   private static String[] getCleanedUpArguments(String[] args) throws IOException {
     // Expand all @file arguments
-    List<String> expandedArgs = Lists.newArrayList();
-    for (String arg : args) {
-      if (arg.startsWith("@")) {
-        File file = new File(arg.substring(1));
-        for (String line : Files.readLines(file, StandardCharsets.UTF_8)) {
-          expandedArgs.add(line.replaceAll("^\"(.*)\"$", "$1"));
-        }
-      } else {
-        expandedArgs.add(arg);
-      }
-    }
+    List<String> expandedArgs = Lists.newArrayList(CommandLine.parse(args));
 
     // We skip some arguments that would normally be passed to javac:
     // -J, these are flags to the java environment running javac.
@@ -133,13 +136,15 @@ public abstract class AbstractJavacWrapper {
     // -Werror, we do not want to treat any warnings as errors.
     // -target, we do not care about the compiler outputs
     boolean skipArg = false;
-    List<String> cleanedUpArgs = Lists.newArrayList();
+    List<String> cleanedUpArgs = new ArrayList<>();
     for (String arg : expandedArgs) {
       if (arg.equals("-target")) {
         skipArg = true;
         continue;
-      } else if (!(skipArg || arg.startsWith("-J") ||
-              arg.startsWith("-XD") || arg.startsWith("-Werror"))) {
+      } else if (!(skipArg
+          || arg.startsWith("-J")
+          || arg.startsWith("-XD")
+          || arg.startsWith("-Werror"))) {
         cleanedUpArgs.add(arg);
       }
       skipArg = false;
@@ -148,12 +153,16 @@ public abstract class AbstractJavacWrapper {
     return cleanedUpArgs.toArray(cleanedUpArgsArray);
   }
 
-  private static void writeIndexInfoToFile(
-      String rootDirectory, CompilationDescription indexInfo) throws IOException {
-    String name = indexInfo.getCompilationUnit().getVName().getSignature()
-        .trim()
-        .replaceAll("^/+|/+$", "")
-        .replace('/', '_');
+  private static void writeIndexInfoToFile(String rootDirectory, CompilationDescription indexInfo)
+      throws IOException {
+    String name =
+        indexInfo
+            .getCompilationUnit()
+            .getVName()
+            .getSignature()
+            .trim()
+            .replaceAll("^/+|/+$", "")
+            .replace('/', '_');
     String path = IndexInfoUtils.getIndexPath(rootDirectory, name).toString();
     IndexInfoUtils.writeIndexInfoToFile(indexInfo, path);
   }
@@ -183,13 +192,11 @@ public abstract class AbstractJavacWrapper {
   }
 
   protected static List<String> splitPaths(String path) {
-    List<String> paths = Lists.newArrayList();
-    if (path != null) {
-      for (String cp : path.split(":")) {
-        paths.add(cp);
-      }
-    }
-    return paths;
+    return path == null ? Collections.<String>emptyList() : Splitter.on(":").splitToList(path);
+  }
+
+  protected static List<String> splitCSV(String lst) {
+    return lst == null ? Collections.<String>emptyList() : Splitter.on(",").splitToList(lst);
   }
 
   static String readEnvironmentVariable(String variableName) {
@@ -197,7 +204,12 @@ public abstract class AbstractJavacWrapper {
   }
 
   static String readEnvironmentVariable(String variableName, String defaultValue) {
-    String result = System.getenv(variableName);
+    // First see if we have a system property.
+    String result = System.getProperty(variableName);
+    if (Strings.isNullOrEmpty(result)) {
+      // Fall back to the environment variable.
+      result = System.getenv(variableName);
+    }
     if (Strings.isNullOrEmpty(result)) {
       if (Strings.isNullOrEmpty(defaultValue)) {
         System.err.println(String.format("Missing environment variable: %s", variableName));
@@ -209,7 +221,7 @@ public abstract class AbstractJavacWrapper {
   }
 
   protected static List<String> getSourceList(Collection<File> files) {
-    List<String> sources = Lists.newArrayList();
+    List<String> sources = new ArrayList<>();
     for (File file : files) {
       sources.add(file.getPath());
     }

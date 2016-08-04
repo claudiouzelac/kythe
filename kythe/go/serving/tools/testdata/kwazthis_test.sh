@@ -14,24 +14,24 @@
 # limitations under the License.
 set -o pipefail
 
-BASE_DIR="$TEST_SRCDIR/kythe/go/serving/tools/testdata"
+BASE_DIR="$PWD/kythe/go/serving/tools/testdata"
 OUT_DIR="$TEST_TMPDIR"
 
-TEST_ENTRIES="$TEST_SRCDIR/kythe/javatests/com/google/devtools/kythe/analyzers/java/testdata/pkg/generics_tests.entries"
+TEST_ENTRIES="$PWD/kythe/javatests/com/google/devtools/kythe/analyzers/java/testdata/pkg/generics_tests.entries.gz"
 source "kythe/cxx/common/testdata/start_http_service.sh"
 
 jq () { "third_party/jq/jq" -e "$@" <<<"$JSON"; }
-kwazthis() { "kythe/go/serving/tools/kwazthis" --local_repo=NONE --api "http://$LISTEN_AT" "$@" | tee /dev/stderr; }
+kwazthis() { "kythe/go/serving/tools/kwazthis/kwazthis" --local_repo=NONE --api "http://$LISTEN_AT" "$@" | tee /dev/stderr; }
 
 FILE_PATH=kythe/javatests/com/google/devtools/kythe/analyzers/java/testdata/pkg/Generics.java
 
-JSON=$(kwazthis --path $FILE_PATH --offset 844)
+JSON=$(kwazthis --corpus kythe --path $FILE_PATH --offset 934)
 jq --slurp 'length == 5'
 # .[0] is Generics class def
 # .[1] is f method def
-jq --slurp '.[2].span.text == "Generics<String>"' # ref to Generics<String> type
+# TODO(schroederc): jq --slurp '.[2].span.text == "Generics<String>"' # ref to Generics<String> type
 # .[3] is gs variable def
-jq --slurp '.[4].span.text == "String"'           # ref to String type
+# TODO(schroederc): jq --slurp '.[4].span.text == "String"'           # ref to String type
 jq --slurp '.[] | (.kind == "ref" or .kind == "defines" or .kind == "defines/binding")'
 jq --slurp '.[].node.ticket
         and .[].node.ticket != ""'

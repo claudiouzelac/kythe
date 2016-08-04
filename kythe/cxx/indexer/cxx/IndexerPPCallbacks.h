@@ -21,20 +21,18 @@
 
 #include "clang/Basic/SourceManager.h"
 #include "clang/Lex/PPCallbacks.h"
+#include "clang/Lex/Token.h"
 
-namespace clang {
-class Preprocessor;
-} // namespace clang
+#include "GraphObserver.h"
+#include "IndexerASTHooks.h"
 
 namespace kythe {
-
-class GraphObserver;
 
 /// \brief Listener for preprocessor events, handling file tracking and macro
 /// use and definition.
 class IndexerPPCallbacks : public clang::PPCallbacks {
 public:
-  IndexerPPCallbacks(clang::Preprocessor &PP, GraphObserver &GO);
+  IndexerPPCallbacks(clang::Preprocessor &PP, GraphObserver &GO, Verbosity V);
   ~IndexerPPCallbacks() override;
 
   void FileChanged(clang::SourceLocation Loc,
@@ -142,6 +140,8 @@ private:
   const clang::Preprocessor &Preprocessor;
   /// The `GraphObserver` we will use for reporting information.
   GraphObserver &Observer;
+  /// Whether we should emit all data.
+  enum Verbosity Verbosity;
 };
 
 } // namespace kythe

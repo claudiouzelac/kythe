@@ -21,13 +21,14 @@ import com.google.devtools.kythe.platform.shared.RemoteFileData;
 import com.google.devtools.kythe.platform.shared.StatisticsCollector;
 import com.google.devtools.kythe.proto.Analysis.AnalysisOutput;
 import com.google.devtools.kythe.proto.Analysis.AnalysisRequest;
-import com.google.devtools.kythe.proto.CompilationAnalyzerGrpc.CompilationAnalyzer;
-
+import com.google.devtools.kythe.proto.CompilationAnalyzerGrpc.CompilationAnalyzerImplBase;
+import io.grpc.BindableService;
+import io.grpc.ServerServiceDefinition;
 import io.grpc.stub.StreamObserver;
 
 /** GRPC-based {@link AbstractCompilationAnalyzer} implementation. */
-public abstract class GRPCCompilationAnalyzer
-    extends AbstractCompilationAnalyzer implements CompilationAnalyzer {
+public abstract class GRPCCompilationAnalyzer extends AbstractCompilationAnalyzer
+    implements BindableService {
   public GRPCCompilationAnalyzer() {
     super();
   }
@@ -36,15 +37,23 @@ public abstract class GRPCCompilationAnalyzer
     super(statistics);
   }
 
+  private final CompilationAnalyzerImplBase compilationAnalyzerImpl =
+      new CompilationAnalyzerImplBase() {
+        @Override
+        public void analyze(AnalysisRequest req, StreamObserver<AnalysisOutput> stream) {
+          try {
+            analyzeRequest(req, new StreamEmitter(stream));
+          } catch (Throwable t) {
+            stream.onError(t);
+            return;
+          }
+          stream.onCompleted();
+        }
+      };
+
   @Override
-  public void analyze(AnalysisRequest req, StreamObserver<AnalysisOutput> stream) {
-    try {
-      analyzeRequest(req, new StreamEmitter(stream));
-    } catch (Throwable t) {
-      stream.onError(t);
-      return;
-    }
-    stream.onCompleted();
+  public ServerServiceDefinition bindService() {
+    return compilationAnalyzerImpl.bindService();
   }
 
   @Override
@@ -61,7 +70,7 @@ public abstract class GRPCCompilationAnalyzer
 
     @Override
     public void emitOutput(AnalysisOutput output) {
-      stream.onValue(output);
+      stream.onNext(output);
     }
   }
 }

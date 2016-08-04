@@ -20,14 +20,9 @@ package kythe.proto;
 
 // Design document: <link when written>
 // This proto represents a very preliminary attempt to define a cross-reference
-// service interface, based on Kythe data.  Its main consumer is Acropolis, but
-// the goal is to provide an interface that will be useful to other tools also.
-
-// TODO(fromberger): For now I have used tickets to identify nodes instead of
-// VNames.  We may choose to replace those with VNames.  Otherwise, define and
-// link to the preferred ticket encoding.
-// Strawman: Lightly canonicalized proto wire format encoded base64.
-// Strawman: Kythe URI scheme, a cleaned-up version of the Kythe scheme.
+// service interface, based on Kythe data.
+//
+// Tickets are Kythe URIs (http://www.kythe.io/docs/kythe-uri-spec.html).
 
 // XRefService provides access to a Kythe graph for fast read-only access to
 // cross-reference relationships.  What constitutes a "Cross-reference" is not
@@ -64,9 +59,29 @@ service XRefService {
   // particular file node.
   rpc Decorations(DecorationsRequest) returns (DecorationsReply) {}
 
-	// CrossReferences returns the global references, definitions, and
-	// documentation of a set of requested nodes.
+  // CrossReferences returns the global references, definitions, and
+  // documentation of a set of requested nodes.
   rpc CrossReferences(CrossReferencesRequest) returns (CrossReferencesReply) {}
+
+  // Callers takes a set of tickets for semantic objects and returns the set
+  // of places where those objects were called. For example, in the program
+  //   void bar() { foo(); foo(); } void baz() { foo(); } void foo() { }
+  // `Callers({foo})` would return:
+  //   {(bar, {first-call-anchor, second-call-anchor}),
+  //    (baz, {first-call-anchor})}
+  // To walk further up the call graph, you can project the first field of
+  // each tuple in the result set ({bar, baz}) and feed that set back in
+  // to a new Callers request.
+  //
+  // The core of this query is specified in terms of graph operations in the
+  // Kythe repository at //kythe/docs/schema/callgraph.txt.
+  rpc Callers(CallersRequest) returns (CallersReply) {}
+
+  // Documentation takes a set of tickets for semantic objects and returns
+  // documentation about them, including generated signatures and
+  // user-provided text. The documentation may refer to tickets for other
+  // nodes in the graph.
+  rpc Documentation(DocumentationRequest) returns (DocumentationReply) {}
 }
 
 message NodesRequest {
@@ -81,23 +96,23 @@ message NodesRequest {
   repeated string filter = 2;
 }
 
-// To keep request and reply in sync, the server echoes the request ticket
-// back.  Since the ticket is a fairly substantial fraction of the data for a
-// node, we could save some encoding space by having the server respect the
-// original request ordering offsets.  I think this is too fragile, though, as
-// any error on the part of client or server could perturb the results in a way
-// would be tricky to debug.  I think the protocol will be simplest if we do
-// not couple the reply to the request in this way.
-
 message NodeInfo {
-  string ticket = 1;       // The ticket for a matching node.
-  repeated Fact fact = 2;  // The matching facts known for that node.
+  // The matching facts known for that node, a map from fact name to value.
+  map<string, bytes> facts = 2;
+
+  // If known and unambiguous, an anchor ticket for this node's definition
+  // location.
+  string definition = 5;
+
+  reserved 1;
+  reserved "ticket";
 }
 
 message NodesReply {
-  // One NodeInfo is returned for each requested node that had a non-zero
-  // number of matching facts.
-  repeated NodeInfo node = 1;
+  // One NodeInfo, keyed by its ticket, is returned for each requested node
+  // that had a non-zero number of matching facts.  Each NodeInfo will not have
+  // its ticket set since it would just be a copy of the map keys.
+  map<string, NodeInfo> nodes = 1;
 }
 
 message EdgesRequest {
@@ -156,44 +171,57 @@ message EdgesRequest {
   // calls if they need to.
 }
 
-// An EdgeSet represents a collection of edges outbound from a single node.
-// The edges are organized into groups, each sharing a common edge kind.
+// An EdgeSet represents a collection of edges outbound from a single node.  The
+// edges are organized into groups, each sharing a common edge kind.
 //
-// The number of edges represented by an EdgeSet es, denoted len(es), is the
-// sum of the lengths of the repeated target_ticket fields for all the groups
-// in the EdgeSet.  This count is used to determine page size in a request.
-//
-// TODO(fromberger): Sort out what to do about the rare case of facts attached
-// to edges.
+// The number of edges represented by an EdgeSet es, denoted len(es), is the sum
+// of the lengths of the repeated edge fields for all the groups in the EdgeSet.
+// This count is used to determine page size in a request.
 message EdgeSet {
   message Group {
-    string kind = 1;
-    repeated string target_ticket = 2;
+    message Edge {
+      string target_ticket = 1;
+
+      // An optional integer to give an ordering between multiple edges of same
+      // source and kind to one or more targets.  See https://kythe.io/schema
+      // for when ordinals are used for a given edge kind.
+      int32 ordinal = 2;
+    }
+
+    repeated Edge edge = 2;
+
+    reserved 1;
+    reserved "kind";
   }
 
-  // The ticket of the source node for all the edges in the edge set.
-  string source_ticket = 1;
-
   // Each group is a collection of outbound edges from source node sharing a
-  // given kind.  In a given EdgeSet, the server will not send more than one
-  // group with the same kind label.
-  repeated Group group = 2;
+  // given kind, the map's keys.  In a given EdgeSet, the server will not send
+  // more than one group with the same kind label.
+  map<string, Group> groups = 2;
+
+  reserved 1;
+  reserved "source_ticket";
 }
 
 message EdgesReply {
   // This field will contain one EdgeSet for each source node with one or more
-  // matching outbound edges.  The number of edges represented by an EdgesReply
-  // er, denoted len(er), is the sum of len(es) for each es in edgeset.  This
-  // count is used to determine the page size.
-  repeated EdgeSet edge_set = 1;
+  // matching outbound edges, keyed by the source node's ticket.  The number of
+  // edges represented by an EdgesReply er, denoted len(er), is the sum of
+  // len(es) for each es in edge_sets.  This count is used to determine the page
+  // size.
+  map<string, EdgeSet> edge_sets = 1;
 
-  // This field will contain one entry for each distinct node referenced by
-  // some edge in edgesets, for which there is one or more matching facts.
+  // This field will contain one entry, keyed by ticket, for each distinct node
+  // referenced by some edge in edgesets, for which there is one or more
+  // matching facts.
   //
   // Rationale: This prevents us from having to copy the data to all the end
   // nodes, but allows the client to have that information without making
   // additional requests.
-  repeated NodeInfo node = 2;
+  map<string, NodeInfo> nodes = 2;
+
+  // Total number of edges on all pages matching requested kinds, by kind.
+  map<string, int64> total_edges_by_kind = 5;
 
   // If there are additional pages of edges after the ones returned in this
   // reply, next_page_token is the page token that may be passed to fetch the
@@ -202,17 +230,13 @@ message EdgesReply {
   string next_page_token = 9;
 }
 
-// Fact represents a single key/value fact from the graph.
-message Fact {
-  string name = 1;
-  bytes value = 2;
-}
-
 // A Location represents a single span of zero or more contiguous bytes of a
 // file or buffer.  An empty LOCATION denotes the entirety of the referenced
 // file or buffer.
 //
 message Location {
+  // TODO(schroederc): reuse Span from common.proto
+
   // The ticket of the file this location belongs to.  If the location
   // represents a memory buffer, the ticket should be omitted.
   string ticket = 1;
@@ -266,11 +290,20 @@ message Location {
 
 message DecorationsRequest {
   // The location of the file to fetch decorations for.  The ticket of location
-  // must be non-empty.
-  //
-  // If the location is a SPAN, decorations are only returned for the specified
-  // window of the file.  It is an error in any case if location is invalid.
+  // must be non-empty.  It is an error in any case if location is invalid.
   Location location = 1;
+
+  enum SpanKind {
+    // If the location is a SPAN, only decorations contained within the
+    // specified window of the file are returned.  This is the default behavior.
+    WITHIN_SPAN = 0;
+
+    // If the location is a SPAN, any decorations that surround it are returned.
+    AROUND_SPAN = 1;
+  }
+
+  // How to treat SPAN locations.
+  SpanKind span_kind = 10;
 
   // If dirty_buffer is non-empty, the results will be adjusted (patched) to
   // account for the regions of the specified file differing from the contents
@@ -284,6 +317,10 @@ message DecorationsRequest {
   // If true, return reference edges whose source nodes are located in the
   // selected window.  References are affected by patching.
   bool references = 4;
+
+  // If true, return definition locations, if possible, for each returned
+  // reference target in the DecorationsReply.
+  bool target_definitions = 6;
 
   // A collection of filter globs that specify which facts (by name) should be
   // returned for each node.  If filter is empty or unset, no node facts are
@@ -311,14 +348,24 @@ message DecorationsReply {
     Location.Point anchor_start = 10;
     // Ending byte offset of this references's anchor (source_ticket) span.
     Location.Point anchor_end = 11;
+
+    // Anchor ticket of the target's definition.  Populated only if
+    // target_definitions is true in the DecorationsRequest and the target has
+    // a single unambiguous definition.  For each ticket, an Anchor will be
+    // populated in the top-level definition_locations map.
+    string target_definition = 4;
   }
 
   // The reference edges located in the specified window.
   repeated Reference reference = 4;
 
-  // This field will contain one entry for each distinct node referenced by a
-  // reference edge that has at least 1 non-filtered fact.
-  repeated NodeInfo node = 15;
+  // This field will contain one entry, keyed by ticket, for each distinct node
+  // referenced by a reference edge that has at least 1 non-filtered fact.
+  map<string, NodeInfo> nodes = 15;
+
+  // Each anchor cited as a target definition in the references.  The map is
+  // keyed by each anchor's ticket.
+  map<string, Anchor> definition_locations = 16;
 
   // TODO(fromberger): Patch diff information.
 }
@@ -350,12 +397,31 @@ message CrossReferencesRequest {
   // information.
   DefinitionKind definition_kind = 2;
 
+  enum DeclarationKind {
+    // No declarations will be populated in the CrossDeclarationsReply.
+    NO_DECLARATIONS = 0;
+    // When the source node is incomplete, all known declaration anchors reached
+    // by the "/kythe/edge/defines" edge kind (or its variants) will be
+    // populated in the CrossDeclarationsReply.
+    ALL_DECLARATIONS = 1;
+  }
+
+  // Determines what kind of declaration anchors, if any, should be returned in
+  // the response.  See the documentation for each DeclarationKind for more
+  // information.
+  DeclarationKind declaration_kind = 7;
+
   enum ReferenceKind {
     // No references will be populated in the CrossReferencesReply.
     NO_REFERENCES = 0;
+    // Only callgraph-related references as described in
+    // http://www.kythe.io/docs/schema/callgraph.html
+    CALL_REFERENCES = 1;
+    // All references except those that are related to the callgraph.
+    NON_CALL_REFERENCES = 2;
     // All known reference anchors reached by the "/kythe/edge/ref" edge kind
     // (or its variants) will be populated in the CrossReferencesReply.
-    ALL_REFERENCES = 1;
+    ALL_REFERENCES = 3;
   }
 
   // Determines what kind of reference anchors, if any, should be returned in
@@ -376,6 +442,21 @@ message CrossReferencesRequest {
   // information.
   DocumentationKind documentation_kind = 4;
 
+  enum CallerKind {
+    // No callgraph information will be populated in the CrossReferencesReply.
+    NO_CALLERS = 0;
+    // Callgraph information will be populated in the CrossReferencesReply.
+    DIRECT_CALLERS = 1;
+    // Callgraph information will be populated in the CrossReferencesReply.
+    // Calls to override-related functions will also be considered.
+    OVERRIDE_CALLERS = 2;
+  }
+
+  // Determines what kind of callgraph information, if any, should be returned
+  // in the response.  See the documentation for each CallerKind for more
+  // information.
+  CallerKind caller_kind = 12;
+
   // Collection of filter globs that determines which facts will be returned for
   // the related nodes of each requested node.  If filter is empty or unset, no
   // node facts or related nodes are returned.  See EdgesRequest for the format
@@ -385,6 +466,20 @@ message CrossReferencesRequest {
   // Determines whether each Anchor in the response should have its text field
   // populated.
   bool anchor_text = 6;
+
+  // Determines whether each NodeInfo matching the above filters will have its
+  // definition location populated, if known.
+  bool node_definitions = 8;
+
+  // Enable the experimental generation of signatures in the
+  // CrossReferencesReply.  Enabling this currently causes multiple lookups and
+  // can significantly impact latency.  Once latency concerns have been
+  // addressed, this field will be removed and signatures will be returned by
+  // default.
+  // TODO(T156): remove this flag; always enable feature
+  bool experimental_signatures = 100;
+
+  // TODO(schroederc): snippet kinds (none, indexer-default, or always line-based)
 
   // The cross-references matching a request are organized into logical pages.
   // The size of each page is a number of distinct cross-references
@@ -410,6 +505,8 @@ message CrossReferencesRequest {
   string page_token = 11;
 }
 
+// TODO(schroederc): eliminate duplicate serving.ExpandedAnchor message defintion
+
 message Anchor {
   // Ticket of the anchor node
   string ticket = 1;
@@ -429,6 +526,26 @@ message Anchor {
   // User-readable snippet of the anchor parent's text at the location of this
   // anchor
   string snippet = 7;
+  // Starting location of the anchor's snippet within its parent's text
+  Location.Point snippet_start = 8;
+  // Ending location of the anchor's snippet within its parent's text
+  Location.Point snippet_end = 9;
+}
+
+message Link {
+  // Definition sites found for some ticket.
+  repeated Anchor definition = 1;
+}
+
+message Printable {
+  // Raw text that can be displayed to the user (but may also contain
+  // markup that can be interpreted, like Doxygen comments). Links are
+  // marked using []. \ is an escape character (where possible escape
+  // sequences are \[, \], and \\).
+  string raw_text = 1;
+  // Destinations for links in raw_text. The ith Link corresponds to the link
+  // starting at the ith [.
+  repeated Link link = 2;
 }
 
 message CrossReferencesReply {
@@ -437,21 +554,54 @@ message CrossReferencesReply {
     string ticket = 1;
     // Edge kind describing the node's relation
     string relation_kind = 2;
+    // Optional ordinal for edges of the same relation_kind.
+    int32 ordinal = 3;
+  }
+
+  message RelatedAnchor {
+    // The anchor covering the related object.
+    Anchor anchor = 1;
+    // A name for the related object.
+    Printable display_name = 2;
+    // Specific locations, usually within the related object, that caused
+    // the relationship to exist. This field is relevant to caller sets.
+    repeated Anchor site = 3;
+    // The relevant semantic object. Populated for callers.
+    string ticket = 4;
   }
 
   message CrossReferenceSet {
     string ticket = 1;
 
+    // A name for the given node.
+    Printable display_name = 7;
+
     // The set of definitions for the given node.
-    repeated Anchor definition = 2;
+    repeated RelatedAnchor definition = 2;
+    // The set of declarations for the given node.
+    repeated RelatedAnchor declaration = 5;
     // The set of simple references for the given node.
-    repeated Anchor reference = 3;
+    repeated RelatedAnchor reference = 3;
     // The set of documentation for the given node.
-    repeated Anchor documentation = 4;
+    repeated RelatedAnchor documentation = 4;
+    // The set of callers for the given node.
+    repeated RelatedAnchor caller = 6;
 
     // The set of related nodes to the given node.
     repeated RelatedNode related_node = 10;
   }
+
+  message Total {
+    int64 definitions = 1;
+    int64 declarations = 2;
+    int64 references = 3;
+    int64 documentation = 4;
+    int64 callers = 5;
+
+    map<string, int64> related_nodes_by_relation = 6;
+  }
+  // Total number of cross-references on all pages matching requested filters.
+  Total total = 5;
 
   // Sets of cross-references for each requested node
   map<string, CrossReferenceSet> cross_references = 1;
@@ -459,9 +609,128 @@ message CrossReferencesReply {
   // The facts left from the requested filters of the related node facts
   map<string, NodeInfo> nodes = 2;
 
+  // Map from the definition tickets referred to in each NodeInfo to their
+  // Anchor.  This map will only be returned if the
+  // CrossReferencesRequest.node_definitions switch is true.
+  map<string, Anchor> definition_locations = 3;
+
   // If there are additional pages of cross-references after the ones returned
   // in this reply, next_page_token is the page token that may be passed to
   // fetch the next page in sequence after this one.  If there are no additional
   // cross-references, this field will be empty.
   string next_page_token = 10;
+}
+
+message CallersRequest {
+  // Semantic tickets for callees (e.g., function nodes).
+  repeated string semantic_object = 1;
+  // Expand the semantic_object set by including nodes that participate in
+  // an `overrides` relationship (in either direction) with nodes in the set.
+  //
+  // In the program:
+  //   struct A { virtual void f(); };
+  //   struct B : public A { void f() override; };
+  //   struct C : public B { void f() override; };
+  //   void g(B* b) { b->f(); }
+  //
+  // we would return the following results (for queries on the singleton
+  // semantic_object set containing A::f, B::f, or C::f):
+  //
+  // include_overrides  A::f  B::f  C::f
+  //             false    {}   {g}    {}
+  //              true   {g}   {g}   {g}
+  bool include_overrides = 2;
+}
+
+message CallersReply {
+  // Details common to all objects that participate in the call graph.
+  message CallableDetail {
+    // The definition site of the object called or being blamed for a call.
+    // This would be the "bar" in "void bar()" for calls blamed on bar above
+    // and the "foo" in "void foo()" if it refers to foo as a callee.
+    Anchor definition = 1;
+    // The ticket of the callable object. This would refer to the function node
+    // for "bar" or "foo". This object may be the target of a `completes` edge
+    // (e.g., if the call was made to a definition rather than a declaration).
+    string semantic_object = 2;
+    // The unqualified identifier for this object ("bar" or "foo" above,
+    // even if they were defined in some namespace or record). This field
+    // should be human-readable and can be displayed in a UI.
+    string identifier = 4;
+    // An unambiguous (as possible) identifier for this object ("bar()" or
+    // "foo()" above; if it was defined in a namespace, "ns::bar()";
+    // if it took arguments, "ns::bar(int *, void *)"). This field should
+    // be human-readable and can be displayed in a UI.
+    string display_name = 5;
+    // A parameter bound by the object referred to by `definition` above.
+    message Parameter {
+      enum Kind {
+        // A term-level binding (like the `x` in `void foo(int x)`).
+        TERM = 0;
+        // A type-level binding (like the `T` in
+        // `template <typename T> void foo()`).
+        TYPE = 1;
+      }
+      // The parameter's kind.
+      Kind kind = 1;
+      // The parameter's (unqualified) human-readable and displayable name.
+      // May be empty. May also be non-unique; for example, the identifiers for
+      // the (unnamed in the source language) parameters for the function
+      // `void ignore_pair(int, int)` may be "int" and "int".
+      string identifier = 2;
+      // The ticket that refers to the parameter.
+      string ticket = 3;
+    }
+    // The parameters bound by the object referred to by `definition` above.
+    // There is no semantic meaning to the order of this array, but it should
+    // be reasonable to surface the ordering in a UI (for example, term-level
+    // parameters will not be capriciously reordered).
+    repeated Parameter parameter = 6;
+  }
+  // An object that was blamed for making a call to an object in the set passed
+  // to Callers, along with the syntactic locations that caused that blame to
+  // be cast.
+  message Caller {
+    // The object (e.g., a function) responsible for making a call.
+    CallableDetail detail = 1;
+    message CallSite {
+      // The location where a call was found inside the blamed object.
+      Anchor anchor = 1;
+      // This field will be set to true iff this call site was included in the
+      // results because include_overrides was true in CallersRequest.
+      bool call_to_override = 2;
+    }
+    repeated CallSite call_site = 2;
+  }
+  // All objects that were blamed for making calls.
+  repeated Caller caller = 1;
+  // Details for the semantic objects that were passed via a CallersRequest.
+  repeated CallableDetail callee = 2;
+}
+
+message DocumentationRequest {
+  // Semantic tickets about which documentation is sought.
+  repeated string ticket = 1;
+}
+
+message DocumentationReply {
+  message Document {
+    // The ticket to which this Document refers.
+    string ticket = 1;
+    // Documentation that can be displayed to the user.
+    Printable text = 2;
+    // A signature that can be displayed to the user. For variables, this
+    // may just be the variable name; for functions, this may be some version
+    // of the function prototype.
+    Printable signature = 3;
+    // The type as a signature that can be displayed to the user.
+    Printable type = 4;
+    // The initialization value, if any.
+    Printable initializer = 5;
+    // The semantic parent of this value.
+    Printable defined_by = 6;
+    // The node kind being defined.
+    string kind = 7;
+  }
+  repeated Document document = 1;
 }

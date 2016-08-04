@@ -1,110 +1,123 @@
-load("/tools/build_rules/kythe", "java_verifier_test")
+load("//tools:build_rules/kythe.bzl", "java_verifier_test")
 
 java_verifier_test(
     name = "annotations_tests",
-    srcs = [
-        "Annotations.java",
-    ],
+    size = "small",
+    srcs = ["Annotations.java"],
+)
+
+java_verifier_test(
+    name = "callgraph_tests",
+    size = "small",
+    srcs = ["Callgraph.java"],
 )
 
 java_verifier_test(
     name = "definitions_tests",
-    srcs = [
-        "Definitions.java",
-    ],
+    size = "small",
+    srcs = ["Definitions.java"],
 )
 
 java_verifier_test(
     name = "selectors_tests",
-    srcs = [
-        "Selectors.java",
-    ],
+    size = "small",
+    srcs = ["Selectors.java"],
 )
 
 java_verifier_test(
     name = "comments_tests",
-    srcs = [
-        "Comments.java",
-    ],
+    size = "small",
+    srcs = ["Comments.java"],
 )
 
 java_verifier_test(
     name = "classes_tests",
-    srcs = [
-        "Classes.java",
-    ],
+    size = "small",
+    srcs = ["Classes.java"],
 )
 
 java_verifier_test(
     name = "enums_tests",
-    srcs = [
-        "Enums.java",
-    ],
+    size = "small",
+    srcs = ["Enums.java"],
+)
+
+java_verifier_test(
+    name = "formats_tests",
+    size = "small",
+    srcs = ["Formats.java"],
 )
 
 java_verifier_test(
     name = "interfaces_tests",
-    srcs = [
-        "Interfaces.java",
-    ],
+    size = "small",
+    srcs = ["Interfaces.java"],
 )
 
 java_verifier_test(
     name = "inheritance_tests",
-    srcs = [
-        "Inheritance.java",
-    ],
+    size = "small",
+    srcs = ["Inheritance.java"],
 )
 
 java_verifier_test(
     name = "imports_tests",
-    srcs = [
-        "Imports.java",
-    ],
+    size = "small",
+    srcs = ["Imports.java"],
 )
 
 java_verifier_test(
     name = "files_tests",
-    srcs = [
-        "Files.java",
-    ],
+    size = "small",
+    srcs = ["Files.java"],
 )
 
 java_verifier_test(
     name = "cross_file_tests",
-    srcs = [
-        "CrossFile.java",
-    ],
-    deps = [
-        ":files_tests",
-    ],
+    size = "small",
+    srcs = ["CrossFile.java"],
+    deps = [":files_tests"],
 )
 
 java_verifier_test(
     name = "generics_tests",
-    srcs = [
-        "Generics.java",
-    ],
+    size = "small",
+    srcs = ["Generics.java"],
     visibility = ["//kythe/go/serving/tools/testdata:__pkg__"],
 )
 
 java_verifier_test(
     name = "names_tests",
-    srcs = [
-        "Names.java",
-    ],
+    size = "small",
+    srcs = ["Names.java"],
 )
 
 java_verifier_test(
     name = "methods_tests",
-    srcs = [
-        "Methods.java",
-    ],
+    size = "small",
+    srcs = ["Methods.java"],
 )
 
 java_verifier_test(
     name = "variables_tests",
-    srcs = [
-        "Variables.java",
-    ],
+    size = "small",
+    srcs = ["Variables.java"],
+)
+
+java_verifier_test(
+    name = "snippets_tests",
+    size = "small",
+    srcs = ["Snippets.java"],
+)
+
+java_verifier_test(
+    name = "lambdas_tests",
+    size = "small",
+    srcs = ["Lambdas.java"],
+)
+
+java_verifier_test(
+    name = "member_references_tests",
+    size = "small",
+    srcs = ["MemberReferences.java"],
 )

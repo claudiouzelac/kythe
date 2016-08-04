@@ -1,4 +1,4 @@
-load("/tools/build_rules/go", "go_package")
+load("//tools:build_rules/go.bzl", "go_package")
 
 package(default_visibility = ["//kythe:default_visibility"])
 
@@ -8,9 +8,9 @@ go_package(
         "//kythe/go/test/storage/keyvalue",
     ],
     deps = [
+        "@go_levigo//:levigo",
         "//kythe/go/services/graphstore",
         "//kythe/go/storage/gsutil",
         "//kythe/go/storage/keyvalue",
-        "//third_party/go:levigo",
     ],
 )

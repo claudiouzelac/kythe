@@ -21,8 +21,9 @@
 
 #include "clang/AST/Decl.h"
 
+#include "kythe/cxx/common/indexing/KytheGraphRecorder.h"
+
 #include "GraphObserver.h"
-#include "KytheGraphRecorder.h"
 
 namespace kythe {
 
@@ -77,7 +78,7 @@ public:
   /// \param TargetDecl The NamedDecl being referenced.
   virtual void InspectDeclRef(IndexerASTVisitor &V,
                               clang::SourceLocation DeclRefLocation,
-                              GraphObserver::Range &Ref,
+                              const GraphObserver::Range &Ref,
                               GraphObserver::NodeId &RefId,
                               const clang::NamedDecl *TargetDecl) {}
 };
@@ -102,7 +103,8 @@ public:
   /// additional ref edge to the correspondng google/gflag node.
   void InspectDeclRef(IndexerASTVisitor &V,
                       clang::SourceLocation DeclRefLocation,
-                      GraphObserver::Range &Ref, GraphObserver::NodeId &RefId,
+                      const GraphObserver::Range &Ref,
+                      GraphObserver::NodeId &RefId,
                       const clang::NamedDecl *TargetDecl) override;
 };
 

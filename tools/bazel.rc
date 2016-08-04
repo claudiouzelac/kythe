@@ -1,2 +1,4 @@
-# TODO: http://kythe.io/phabricator/T57
-build --spawn_strategy=standalone --genrule_strategy=standalone
+build --workspace_status_command tools/buildstamp/get_workspace_status
+
+# Enforce absence of Java 8 language features
+build --javacopt '-source 7'

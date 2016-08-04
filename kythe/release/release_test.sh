@@ -17,10 +17,13 @@ set -o pipefail
 #
 # Test the Kythe release package for basic functionality.
 
+export TMPDIR=${TEST_TMPDIR:?}
+
 TEST_PORT=9898
 ADDR=localhost:$TEST_PORT
+TEST_REPOSRCDIR="$PWD"
 
-jq() { "$TEST_SRCDIR/third_party/jq/jq" "$@"; }
+jq() { "$TEST_REPOSRCDIR/third_party/jq/jq" "$@"; }
 
 if ! command -v curl >/dev/null; then
   echo "Test requires curl command" >&2
@@ -39,18 +42,29 @@ cd "$TMPDIR/release"
 cd kythe-*
 
 # Ensure the various tools work on test inputs
-tools/viewindex "$TEST_SRCDIR/kythe/testdata/test.kindex" | \
+tools/viewindex "$TEST_REPOSRCDIR/kythe/testdata/test.kindex" | \
   jq . >/dev/null
-tools/indexpack --to_archive indexpack.test "$TEST_SRCDIR/kythe/testdata/test.kindex"
-tools/entrystream < "$TEST_SRCDIR/kythe/testdata/test.entries" | \
+tools/indexpack --to_archive indexpack.test "$TEST_REPOSRCDIR/kythe/testdata/test.kindex"
+tools/entrystream < "$TEST_REPOSRCDIR/kythe/testdata/test.entries" | \
   tools/entrystream --write_json | \
   tools/entrystream --read_json --entrysets >/dev/null
-tools/triples < "$TEST_SRCDIR/kythe/testdata/test.entries" >/dev/null
+tools/triples < "$TEST_REPOSRCDIR/kythe/testdata/test.entries" >/dev/null
 
-# TODO(schroederc): add extractor tests
+# TODO(zarko): add cxx extractor tests
+rm -rf "$TMPDIR/java_compilation"
+REAL_JAVAC="$(which java)" \
+  JAVAC_EXTRACTOR_JAR=$PWD/extractors/javac_extractor.jar \
+  KYTHE_ROOT_DIRECTORY="$TEST_REPOSRCDIR" \
+  KYTHE_OUTPUT_DIRECTORY="$TMPDIR/java_compilation" \
+  KYTHE_EXTRACT_ONLY=1 \
+  extractors/javac-wrapper.sh -cp "$TEST_REPOSRCDIR/third_party/guava"/*.jar \
+  "$TEST_REPOSRCDIR/kythe/java/com/google/devtools/kythe/common"/*.java
+cat "$TMPDIR"/javac-extractor.{out,err}
+java -jar indexers/java_indexer.jar "$TMPDIR/java_compilation"/*.kindex | \
+  tools/entrystream --count
 
 # Ensure the Java indexer works on a curated test compilation
-java -jar indexers/java_indexer.jar "$TEST_SRCDIR/kythe/testdata/test.kindex" > entries
+java -jar indexers/java_indexer.jar "$TEST_REPOSRCDIR/kythe/testdata/test.kindex" > entries
 # TODO(zarko): add C++ test kindex entries
 
 # Ensure basic Kythe pipeline toolset works
@@ -69,8 +83,6 @@ if tools/verifier --ignore_dups <(echo "//- Any noSuchEdge Any2") < entries; the
 fi
 
 # Ensure kythe tool is functional
-tools/kythe --api srv search /kythe/node/kind file | \
-  grep -q 'kythe://kythe?lang=java?path=kythe/javatests/com/google/devtools/kythe/analyzers/java/testdata/pkg/Names.java#7571dfe62c239daa2caaeed97638184533b0526f4ab16c872311c954100d11e3'
 tools/kythe --api srv node 'kythe:?lang=java#pkg.Names'
 
 tools/http_server \
@@ -89,18 +101,16 @@ done
 curl -sf $ADDR >/dev/null
 curl -sf $ADDR/corpusRoots | jq . >/dev/null
 curl -sf $ADDR/dir | jq . >/dev/null
-curl -sf $ADDR/search -d '{"partial": {"language": "java"}, "fact": [{"name": "/kythe/node/kind", "value": "cmVjb3Jk"}]}' | \
-  jq -e '(.ticket | length) > 0'
 curl -sf $ADDR/nodes -d '{"ticket": ["kythe:?lang=java#pkg.Names"]}' | \
-  jq -e '(.node | length) > 0'
+  jq -e '(.nodes | length) > 0'
 curl -sf $ADDR/edges -d '{"ticket": ["kythe:?lang=java#pkg.Names"]}' | \
-  jq -e '(.edge_set | length) > 0'
-curl -sf $ADDR/decorations -d '{"location": {"ticket": "kythe://kythe?lang=java?path=kythe/javatests/com/google/devtools/kythe/analyzers/java/testdata/pkg/Names.java#7571dfe62c239daa2caaeed97638184533b0526f4ab16c872311c954100d11e3"}, "source_text": true, "references": true}' | \
+  jq -e '(.edge_sets | length) > 0'
+curl -sf $ADDR/decorations -d '{"location": {"ticket": "kythe://kythe?path=kythe/javatests/com/google/devtools/kythe/analyzers/java/testdata/pkg/Names.java"}, "source_text": true, "references": true}' | \
   jq -e '(.reference | length) > 0
-     and (.node | length) == 0
+     and (.nodes | length) == 0
      and (.source_text | type) == "string"
      and (.source_text | length) > 0'
-curl -sf $ADDR/decorations -d '{"location": {"ticket": "kythe://kythe?lang=java?path=kythe/javatests/com/google/devtools/kythe/analyzers/java/testdata/pkg/Names.java#7571dfe62c239daa2caaeed97638184533b0526f4ab16c872311c954100d11e3"}, "references": true, "filter": ["**"]}' | \
+curl -sf $ADDR/decorations -d '{"location": {"ticket": "kythe://kythe?path=kythe/javatests/com/google/devtools/kythe/analyzers/java/testdata/pkg/Names.java"}, "references": true, "filter": ["**"]}' | \
   jq -e '(.reference | length) > 0
-     and (.node | length) > 0
+     and (.nodes | length) > 0
      and (.source_text | length) == 0'

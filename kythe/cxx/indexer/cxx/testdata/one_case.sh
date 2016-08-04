@@ -14,25 +14,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# This script defines one_case, a function that runs the indexer and verifier
-# on a single file test case. The test case contains assertions for the
-# verifier to verify. If a test fails, the variable HAD_ERRORS will be set to 1.
-
-HAD_ERRORS=0
 VERIFIER="kythe/cxx/verifier/verifier"
 INDEXER="kythe/cxx/indexer/cxx/indexer"
-# one_case test-file clang-standard verifier-argument indexer-argument
-function one_case {
-  ${INDEXER} -i $1 $4 $5 -- -std=$2 | ${VERIFIER} $1 $3 $6
-  RESULTS=( ${PIPESTATUS[0]} ${PIPESTATUS[1]} )
-  if [ ${RESULTS[0]} -ne 0 ]; then
-    echo "[ FAILED INDEX: $1 ]"
-    HAD_ERRORS=1
-  elif [ ${RESULTS[1]} -ne 0 ]; then
-    echo "[ FAILED VERIFY: $1 ]"
-    HAD_ERRORS=1
-  else
-    echo "[ OK: $1 ]"
-  fi
-  return $HAD_ERRORS
-}
+# one_case test-file clang-standard {--indexer argument |
+#     --verifier argument | --expected (expectfailindex|expectfailverify)}*
+source kythe/cxx/indexer/cxx/testdata/parse_args.sh
+"${INDEXER}" -i "${TEST_FILE}" "${INDEXER_ARGS[@]}" -- \
+    -std="${CLANG_STANDARD}" | "${VERIFIER}" "${TEST_FILE}" \
+    "${VERIFIER_ARGS[@]}"
+RESULTS=( ${PIPESTATUS[0]} ${PIPESTATUS[1]} )
+source kythe/cxx/indexer/cxx/testdata/handle_results.sh

@@ -11,12 +11,11 @@ cc_library(
         "-Wno-implicit-fallthrough",
     ],
     deps = [
+        "//external:gflags",
+        "//external:glog",
+        "//external:proto/protobuf",
+        "//external:zlib",
         "//kythe/proto:analysis_proto_cc",
-        "//kythe/proto:storage_proto_cc",
-        "//third_party/googleflags:gflags",
-        "//third_party/googlelog:glog",
-        "//third_party/proto:protobuf",
-        "//third_party/zlib",
     ],
 )
 
@@ -31,15 +30,14 @@ cc_library(
         "-Wno-implicit-fallthrough",
     ],
     deps = [
+        "//external:gflags",
+        "//external:glog",
+        "//external:proto/protobuf",
+        "//external:zlib",
         "//kythe/cxx/common:index_pack",
         "//kythe/cxx/common:lib",
         "//kythe/proto:analysis_proto_cc",
         "//kythe/proto:claim_proto_cc",
-        "//kythe/proto:storage_proto_cc",
-        "//third_party/googleflags:gflags",
-        "//third_party/googlelog:glog",
-        "//third_party/proto:protobuf",
-        "//third_party/zlib",
     ],
 )
 
@@ -54,15 +52,14 @@ cc_library(
         "-Wno-implicit-fallthrough",
     ],
     deps = [
+        "//external:gflags",
+        "//external:glog",
+        "//external:proto/protobuf",
+        "//external:zlib",
         "//kythe/cxx/common:index_pack",
         "//kythe/cxx/common:lib",
         "//kythe/proto:analysis_proto_cc",
         "//kythe/proto:claim_proto_cc",
-        "//kythe/proto:storage_proto_cc",
-        "//third_party/googleflags:gflags",
-        "//third_party/googlelog:glog",
-        "//third_party/proto:protobuf",
-        "//third_party/zlib",
     ],
 )
 

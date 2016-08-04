@@ -7,11 +7,7 @@ cc_library(
         "IndexerFrontendAction.cc",
         "IndexerLibrarySupport.cc",
         "IndexerPPCallbacks.cc",
-        "KytheClaimClient.cc",
         "KytheGraphObserver.cc",
-        "KytheGraphRecorder.cc",
-        "KytheOutputStream.cc",
-        "KytheVFS.cc",
     ],
     hdrs = [
         "GraphObserver.h",
@@ -19,11 +15,7 @@ cc_library(
         "IndexerFrontendAction.h",
         "IndexerLibrarySupport.h",
         "IndexerPPCallbacks.h",
-        "KytheClaimClient.h",
         "KytheGraphObserver.h",
-        "KytheGraphRecorder.h",
-        "KytheOutputStream.h",
-        "KytheVFS.h",
     ],
     copts = [
         "-Wno-non-virtual-dtor",
@@ -31,17 +23,18 @@ cc_library(
         "-Wno-implicit-fallthrough",
     ],
     deps = [
+        "//external:gflags",
+        "//external:libmemcached",
+        "//external:proto/protobuf",
         "//kythe/cxx/common:index_pack",
         "//kythe/cxx/common:json_proto",
         "//kythe/cxx/common:lib",
+        "//kythe/cxx/common/indexing:lib",
         "//kythe/proto:analysis_proto_cc",
         "//kythe/proto:cxx_proto_cc",
         "//kythe/proto:storage_proto_cc",
-        "//third_party:libmemcached",
-        "//third_party/googleflags:gflags",
         "//third_party/llvm",
         "//third_party/llvm/src:clang_builtin_headers",
-        "//third_party/proto:protobuf",
     ],
 )
 
@@ -57,16 +50,12 @@ cc_library(
     ],
     deps = [
         ":lib",
+        "//external:gflags",
+        "//external:glog",
+        "//external:proto/protobuf",
+        "//external:zlib",
         "//kythe/cxx/common:lib",
-        "//kythe/proto:analysis_proto_cc",
-        "//kythe/proto:claim_proto_cc",
-        "//kythe/proto:cxx_proto_cc",
-        "//kythe/proto:storage_proto_cc",
-        "//third_party/googleflags:gflags",
-        "//third_party/googlelog:glog",
-        "//third_party/llvm",
-        "//third_party/proto:protobuf",
-        "//third_party/zlib",
+        "//kythe/cxx/common/indexing:frontend",
     ],
 )
 
@@ -83,9 +72,6 @@ cc_library(
     srcs = [
         "KytheIndexerUnitTest.cc",
     ],
-    hdrs = [
-        "RecordingOutputStream.h",
-    ],
     copts = [
         "-Wno-non-virtual-dtor",
         "-Wno-unused-variable",
@@ -93,17 +79,27 @@ cc_library(
     ],
     deps = [
         ":lib",
-        "//kythe/proto:cxx_proto_cc",
-        "//kythe/proto:storage_proto_cc",
-        "//third_party/googletest",
+        "//external:googletest",
+        "//external:proto/protobuf",
+        "//kythe/cxx/common/indexing:testlib",
         "//third_party/llvm",
-        "//third_party/proto:protobuf",
     ],
 )
 
 cc_test(
     name = "test",
+    size = "small",
+    linkopts = select({
+        ":darwin": ["-headerpad_max_install_names"],
+        "//conditions:default": [],
+    }),
     deps = [
         ":testlib",
     ],
+)
+
+config_setting(
+    name = "darwin",
+    values = {"cpu": "darwin"},
+    visibility = ["//visibility:public"],
 )

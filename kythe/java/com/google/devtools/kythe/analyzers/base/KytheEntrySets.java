@@ -22,7 +22,8 @@ import com.google.devtools.kythe.platform.shared.StatisticsCollector;
 import com.google.devtools.kythe.proto.Analysis.CompilationUnit.FileInput;
 import com.google.devtools.kythe.proto.Storage.VName;
 import com.google.devtools.kythe.util.KytheURI;
-
+import com.google.devtools.kythe.util.Span;
+import java.nio.charset.Charset;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.HashMap;
@@ -33,12 +34,12 @@ import java.util.Map;
 /**
  * Factory for Kythe-compliant node and edge {@link EntrySet}s. In general, this class provides two
  * sets of methods: low-level node/edge builders and higher-level abstractions for specific kinds of
- * nodes/edges such as ANCHOR nodes and their edges.  Each higher-level abstraction returns a fully
- * realized {@link EntrySet} and automatically emits it (and any associated edges).  The lower-level
+ * nodes/edges such as ANCHOR nodes and their edges. Each higher-level abstraction returns a fully
+ * realized {@link EntrySet} and automatically emits it (and any associated edges). The lower-level
  * methods, such as {@link #newNode(String)} return {@link EntrySet.Builder}s and must be emitted by
  * the client.
  *
- * This class is meant to be subclassed to build indexer-specific nodes and edges.
+ * <p>This class is meant to be subclassed to build indexer-specific nodes and edges.
  */
 public class KytheEntrySets {
   public static final String NODE_PREFIX = "/kythe/";
@@ -52,7 +53,10 @@ public class KytheEntrySets {
   private final VName compilationVName;
   private final Map<String, VName> inputVNames;
 
-  public KytheEntrySets(StatisticsCollector statistics, FactEmitter emitter, VName compilationVName,
+  public KytheEntrySets(
+      StatisticsCollector statistics,
+      FactEmitter emitter,
+      VName compilationVName,
       List<FileInput> requiredInputs) {
     this.statistics = statistics;
     this.emitter = emitter;
@@ -63,8 +67,8 @@ public class KytheEntrySets {
     for (FileInput input : requiredInputs) {
       String digest = input.getInfo().getDigest();
       VName.Builder name = input.getVName().toBuilder();
-      Preconditions.checkArgument(!name.getPath().isEmpty(),
-          "Required input VName must have non-empty path");
+      Preconditions.checkArgument(
+          !name.getPath().isEmpty(), "Required input VName must have non-empty path");
       if (name.getSignature().isEmpty()) {
         // Ensure file VName has digest signature
         name = name.setSignature(digest);
@@ -91,38 +95,51 @@ public class KytheEntrySets {
    */
   @Deprecated
   public NodeBuilder newNode(String kind) {
-    getStatisticsCollector()
-        .incrementCounter("deprecated-new-node-" + kind);
+    getStatisticsCollector().incrementCounter("deprecated-new-node-" + kind);
     return new NodeBuilder(kind, null, language);
   }
 
   /** Returns a new {@link NodeBuilder} with the given node kind set. */
   public NodeBuilder newNode(NodeKind kind) {
-    getStatisticsCollector()
-        .incrementCounter("new-node-" + kind);
+    getStatisticsCollector().incrementCounter("new-node-" + kind);
     return new NodeBuilder(kind, language);
   }
 
   /** Returns (and emits) a new builtin node. */
   public EntrySet getBuiltin(String name) {
-    EntrySet node = emitAndReturn(newNode(NodeKind.TBUILTIN)
-        .setSignature(name + "#builtin"));
+    EntrySet node =
+        emitAndReturn(
+            newNode(NodeKind.TBUILTIN).setSignature(name + "#builtin").setProperty("format", name));
     emitName(node, name);
     return node;
   }
 
   /** Returns (and emits) a new anchor node at the given location in the file. */
-  public EntrySet getAnchor(VName fileVName, int start, int end) {
-    if (start > end || start < 0) {
+  public EntrySet getAnchor(VName fileVName, Span loc) {
+    return getAnchor(fileVName, loc, null);
+  }
+
+  /**
+   * Returns (and emits) a new anchor node at the given location in the file with an optional
+   * snippet span.
+   */
+  public EntrySet getAnchor(VName fileVName, Span loc, Span snippet) {
+    if (loc == null || !loc.valid()) {
       // TODO(schroederc): reduce number of invalid anchors
       return null;
     }
-    EntrySet anchor = newNode(NodeKind.ANCHOR)
-        .setCorpusPath(CorpusPath.fromVName(fileVName))
-        .addSignatureSalt(fileVName)
-        .setProperty("loc/start", "" + start)
-        .setProperty("loc/end", "" + end)
-        .build();
+    EntrySet.Builder builder =
+        newNode(NodeKind.ANCHOR)
+            .setCorpusPath(CorpusPath.fromVName(fileVName))
+            .addSignatureSalt(fileVName)
+            .setProperty("loc/start", "" + loc.getStart())
+            .setProperty("loc/end", "" + loc.getEnd());
+    if (snippet != null && snippet.valid()) {
+      builder
+          .setProperty("snippet/start", "" + snippet.getStart())
+          .setProperty("snippet/end", "" + snippet.getEnd());
+    }
+    EntrySet anchor = builder.build();
     emitEdge(anchor.getVName(), EdgeKind.CHILDOF, fileVName);
     return emitAndReturn(anchor);
   }
@@ -137,14 +154,27 @@ public class KytheEntrySets {
     return node;
   }
 
-  /** Emits and returns a new {@link EntrySet} representing a file. */
-  public EntrySet getFileNode(String digest, byte[] contents, String encoding) {
+  /**
+   * Returns the {@link VName} of the {@link NodeKind.FILE} node with the given contents digest. If
+   * none is found, return {@code null}.
+   */
+  public VName getFileVName(String digest) {
     VName name = lookupVName(digest);
-    EntrySet node = emitAndReturn(newNode(NodeKind.FILE)
-        .setCorpusPath(CorpusPath.fromVName(name))
-        .setSignature(name.getSignature())
-        .setProperty("text", contents)
-        .setProperty("text/encoding", encoding));
+    if (name == null) {
+      return null;
+    }
+    // https://www.kythe.io/docs/schema/#file
+    return name.toBuilder().setLanguage("").setSignature("").build();
+  }
+
+  /** Emits and returns a new {@link EntrySet} representing a file. */
+  public EntrySet getFileNode(String digest, byte[] contents, Charset encoding) {
+    VName name = getFileVName(digest);
+    EntrySet node =
+        emitAndReturn(
+            newNode(NodeKind.FILE, name)
+                .setProperty("text", contents)
+                .setProperty("text/encoding", encoding.name()));
     Path fileName = Paths.get(name.getPath()).getFileName();
     if (fileName != null) {
       emitName(node, fileName.toString());
@@ -153,14 +183,14 @@ public class KytheEntrySets {
   }
 
   /**
-   * Returns a {@link NodeBuilder} with the given kind and added signature salts for each
-   * {@link EntrySet} dependency.
+   * Returns a {@link NodeBuilder} with the given kind and added signature salts for each {@link
+   * EntrySet} dependency.
    */
   public NodeBuilder newNode(NodeKind kind, Iterable<EntrySet> dependencies) {
     NodeBuilder builder = newNode(kind);
     for (EntrySet e : dependencies) {
       builder.addSignatureSalt(e.getVName());
-    };
+    }
     return builder;
   }
 
@@ -178,19 +208,14 @@ public class KytheEntrySets {
 
   /** Emits an edge of the given kind from {@code source} to {@code target}. */
   public void emitEdge(VName source, EdgeKind kind, VName target) {
-    getStatisticsCollector()
-        .incrementCounter("emit-edge-" + kind);
+    getStatisticsCollector().incrementCounter("emit-edge-" + kind);
     new EdgeBuilder(source, kind, target).build().emit(emitter);
   }
 
   /** Emits an edge of the given kind and ordinal from {@code source} to {@code target}. */
   public void emitEdge(EntrySet source, EdgeKind kind, EntrySet target, int ordinal) {
-    getStatisticsCollector()
-        .incrementCounter("emit-edge-" + kind);
-    new EdgeBuilder(source.getVName(), kind, target.getVName())
-        .setOrdinal(ordinal)
-        .build()
-        .emit(emitter);
+    getStatisticsCollector().incrementCounter("emit-edge-" + kind);
+    new EdgeBuilder(source.getVName(), kind, ordinal, target.getVName()).build().emit(emitter);
   }
 
   /**
@@ -205,8 +230,8 @@ public class KytheEntrySets {
    * Emits edges of the given kind from {@code source} to each of the target {@link EntrySet}s, with
    * their respective {@link Iterable} order as their edge ordinal.
    */
-  public void emitOrdinalEdges(EntrySet source, EdgeKind kind, Iterable<EntrySet> targets,
-      int startingOrdinal) {
+  public void emitOrdinalEdges(
+      EntrySet source, EdgeKind kind, Iterable<EntrySet> targets, int startingOrdinal) {
     int ordinal = startingOrdinal;
     for (EntrySet target : targets) {
       emitEdge(source, kind, target, ordinal++);
@@ -215,8 +240,7 @@ public class KytheEntrySets {
 
   /** Returns (and emits) a new abstract node over child. */
   public EntrySet newAbstract(EntrySet child, List<EntrySet> params) {
-    EntrySet abs = emitAndReturn(newNode(NodeKind.ABS)
-        .addSignatureSalt(child.getVName()));
+    EntrySet abs = emitAndReturn(newNode(NodeKind.ABS).addSignatureSalt(child.getVName()));
     emitEdge(child, EdgeKind.CHILDOF, abs);
     emitOrdinalEdges(abs, EdgeKind.PARAM, params);
     return abs;
@@ -238,22 +262,25 @@ public class KytheEntrySets {
   }
 
   /**
-   * Returns a {@link NodeBuilder} with the given kind and added signature salts for each
-   * {@link EntrySet} dependency as well as the "head" node of the application.
+   * Returns a {@link NodeBuilder} with the given kind and added signature salts for each {@link
+   * EntrySet} dependency as well as the "head" node of the application.
    */
   private NodeBuilder newApplyNode(NodeKind kind, EntrySet head, Iterable<EntrySet> dependencies) {
     return newNode(kind, dependencies).addSignatureSalt(head.getVName());
   }
 
+  private NodeBuilder newNode(NodeKind kind, VName name) {
+    getStatisticsCollector().incrementCounter("new-node-" + kind);
+    return new NodeBuilder(kind, name);
+  }
+
   /**
    * Returns the {@link FileInput}'s {@link VName} with the given digest. If none is found, return
-   * {@code null}.
+   * {@code null}. This is the raw form of {@link #getFileName(String)}.
    */
   protected VName lookupVName(String digest) {
     VName inputVName = inputVNames.get(digest);
-    return inputVName == null
-        ? null
-        : EntrySet.extendVName(compilationVName, inputVName);
+    return inputVName == null ? null : EntrySet.extendVName(compilationVName, inputVName);
   }
 
   protected EntrySet emitAndReturn(EntrySet.Builder b) {
@@ -274,8 +301,17 @@ public class KytheEntrySets {
       this(kind.getKind(), kind.getSubkind(), language);
     }
 
+    public NodeBuilder(NodeKind kind, VName name) {
+      super(name, null, null);
+      setupNode(kind.getKind(), kind.getSubkind());
+    }
+
     private NodeBuilder(String kind, String subkind, String language) {
       super(VName.newBuilder().setLanguage(language));
+      setupNode(kind, subkind);
+    }
+
+    private void setupNode(String kind, String subkind) {
       setPropertyPrefix(NODE_PREFIX);
       setProperty(NODE_KIND_LABEL, kind);
       if (subkind != null) {
@@ -298,10 +334,7 @@ public class KytheEntrySets {
     }
 
     public NodeBuilder setCorpusPath(CorpusPath p) {
-      sourceBuilder
-          .setCorpus(p.getCorpus())
-          .setRoot(p.getRoot())
-          .setPath(p.getPath());
+      sourceBuilder.setCorpus(p.getCorpus()).setRoot(p.getRoot()).setPath(p.getPath());
       return this;
     }
 
@@ -318,14 +351,12 @@ public class KytheEntrySets {
 
   /** {@link EntrySet.Builder} for Kythe edges. */
   public static class EdgeBuilder extends EntrySet.Builder {
-    private static final String ORDINAL_EDGE_KIND = "/kythe/ordinal";
-
     public EdgeBuilder(VName source, EdgeKind kind, VName target) {
       super(source, kind.getValue(), target);
     }
 
-    public EdgeBuilder setOrdinal(int ordinal) {
-      return setProperty(ORDINAL_EDGE_KIND, "" + ordinal);
+    public EdgeBuilder(VName source, EdgeKind kind, int ordinal, VName target) {
+      super(source, kind.getValue(), ordinal, target);
     }
 
     @Override

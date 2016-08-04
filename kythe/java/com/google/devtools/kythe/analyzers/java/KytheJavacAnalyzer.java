@@ -18,43 +18,60 @@ package com.google.devtools.kythe.analyzers.java;
 
 import com.google.common.base.Preconditions;
 import com.google.devtools.kythe.analyzers.base.FactEmitter;
+import com.google.devtools.kythe.common.FormattingLogger;
 import com.google.devtools.kythe.platform.java.JavaCompilationDetails;
 import com.google.devtools.kythe.platform.java.JavacAnalyzer;
 import com.google.devtools.kythe.platform.java.helpers.SignatureGenerator;
 import com.google.devtools.kythe.platform.shared.AnalysisException;
 import com.google.devtools.kythe.platform.shared.StatisticsCollector;
 import com.google.devtools.kythe.proto.Analysis.CompilationUnit;
-
 import com.sun.source.tree.CompilationUnitTree;
 import com.sun.tools.javac.api.JavacTaskImpl;
 import com.sun.tools.javac.tree.JCTree.JCCompilationUnit;
 import com.sun.tools.javac.util.Context;
-
 import java.io.IOException;
-import java.nio.charset.Charset;
+import javax.tools.Diagnostic;
 
 /** {@link JavacAnalyzer} to emit Kythe nodes and edges. */
 public class KytheJavacAnalyzer extends JavacAnalyzer {
   private static final long serialVersionUID = 7458181626939870354L;
 
+  private static final FormattingLogger logger =
+      FormattingLogger.getLogger(KytheJavacAnalyzer.class);
+
   private final FactEmitter emitter;
+  private final IndexerConfig config;
 
   // should be set in analyzeCompilationUnit before any call to analyzeFile
   private JavaEntrySets entrySets;
 
-  public KytheJavacAnalyzer(FactEmitter emitter, StatisticsCollector statistics) {
+  public KytheJavacAnalyzer(
+      IndexerConfig config, FactEmitter emitter, StatisticsCollector statistics) {
     super(statistics);
     Preconditions.checkArgument(emitter != null, "FactEmitter must be non-null");
+    Preconditions.checkArgument(config != null, "IndexerConfig must be non-null");
     this.emitter = emitter;
+    this.config = config;
   }
 
   @Override
   public void analyzeCompilationUnit(JavaCompilationDetails details) throws AnalysisException {
-    Preconditions.checkState(entrySets == null,
+    Preconditions.checkState(
+        entrySets == null,
         "JavaEntrySets is non-null (analyzeCompilationUnit was called concurrently?)");
+    if (config.getVerboseLogging()) {
+      for (Diagnostic<?> err : details.getCompileErrors()) {
+        logger.warningfmt("javac compilation error: %s", err);
+      }
+    }
     CompilationUnit compilation = details.getCompilationUnit();
-    entrySets = new JavaEntrySets(getStatisticsCollector(),
-        emitter, compilation.getVName(), compilation.getRequiredInputList());
+    entrySets =
+        new JavaEntrySets(
+            getStatisticsCollector(),
+            emitter,
+            compilation.getVName(),
+            compilation.getRequiredInputList(),
+            config.getIgnoreVNamePaths());
     try {
       super.analyzeCompilationUnit(details);
     } finally {
@@ -65,13 +82,19 @@ public class KytheJavacAnalyzer extends JavacAnalyzer {
   @Override
   public void analyzeFile(JavaCompilationDetails details, CompilationUnitTree ast)
       throws AnalysisException {
-    Preconditions.checkState(entrySets != null,
-        "analyzeCompilationUnit must be called to analyze each file");
+    Preconditions.checkState(
+        entrySets != null, "analyzeCompilationUnit must be called to analyze each file");
     Context context = ((JavacTaskImpl) details.getJavac()).getContext();
     SignatureGenerator signatureGenerator = new SignatureGenerator(ast, context);
     try {
-      KytheTreeScanner.emitEntries(context, getStatisticsCollector(), entrySets, signatureGenerator,
-          (JCCompilationUnit) ast, Charset.forName(details.getEncoding()));
+      KytheTreeScanner.emitEntries(
+          context,
+          getStatisticsCollector(),
+          entrySets,
+          signatureGenerator,
+          (JCCompilationUnit) ast,
+          details.getEncoding(),
+          config.getVerboseLogging());
     } catch (IOException e) {
       throw new AnalysisException("Exception analyzing file: " + ast.getSourceFile().getName(), e);
     }

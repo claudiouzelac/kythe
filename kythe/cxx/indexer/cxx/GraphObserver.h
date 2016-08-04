@@ -24,11 +24,11 @@
 
 #include <openssl/sha.h> // for SHA256
 
+#include "glog/logging.h"
 #include "clang/Basic/SourceLocation.h"
 #include "clang/Basic/SourceManager.h"
 #include "clang/Basic/Specifiers.h"
 #include "clang/Lex/Preprocessor.h"
-
 #include "llvm/ADT/APSInt.h"
 #include "llvm/ADT/Hashing.h"
 #include "llvm/ADT/StringRef.h"
@@ -45,8 +45,9 @@ namespace kythe {
 constexpr size_t kSha256DigestBase64MaxEncodingLength = 42;
 
 /// \brief A one-way hash for `InString`.
-template <typename String> String CompressString(const String &InString) {
-  if (InString.size() <= kSha256DigestBase64MaxEncodingLength) {
+template <typename String>
+String CompressString(const String &InString, bool Force = false) {
+  if (InString.size() <= kSha256DigestBase64MaxEncodingLength && !Force) {
     return InString;
   }
   ::SHA256_CTX Sha;
@@ -58,6 +59,46 @@ template <typename String> String CompressString(const String &InString) {
   ::SHA256_Final(reinterpret_cast<unsigned char *>(&Hash[0]), &Sha);
   return EncodeBase64(Hash);
 }
+
+/// \brief Escapes `format` such that it can be included in a format string.
+inline std::string EscapeForFormatLiteral(llvm::StringRef format) {
+  std::string escaped;
+  escaped.reserve(format.size());
+  for (char c : format) {
+    if (c == '%') {
+      escaped.push_back('%');
+    }
+    escaped.push_back(c);
+  }
+  return escaped;
+}
+
+enum class ProfilingEvent {
+  Enter, ///< A profiling section was entered.
+  Exit   ///< A profiling section was left.
+};
+
+/// \brief A callback used to report a profiling event.
+///
+/// Profile events have labels (formatted as lowercase strings with words
+/// separated by underscores) and event types.
+using ProfilingCallback = std::function<void(const char *, ProfilingEvent)>;
+
+/// \brief Ensures that Enter events are paired with Exit events.
+class ProfileBlock {
+public:
+  /// \param Callback reporting callback; must outlive `ProfileBlock`
+  /// \param SectionName name for the section; must outlive `ProfileBlock`
+  ProfileBlock(const ProfilingCallback &Callback, const char *SectionName)
+      : Callback(Callback), SectionName(SectionName) {
+    Callback(SectionName, ProfilingEvent::Enter);
+  }
+  ~ProfileBlock() { Callback(SectionName, ProfilingEvent::Exit); }
+
+private:
+  const ProfilingCallback &Callback;
+  const char *SectionName;
+};
 
 /// \brief An interface for processing elements discovered as part of a
 /// compilation unit.
@@ -168,6 +209,12 @@ public:
     enum class RangeKind {
       /// This range relates to a run of bytes in a source file.
       Physical,
+      /// This range refers to source text that was synthesized by the compiler,
+      /// but which is not associated with any written code. For example,
+      /// the ranges associated with implicitly defined constructors are
+      /// Implicit. Ranges that are associated with implicit instantiations
+      /// of templates are Wraiths.
+      Implicit,
       /// This range is related to some bytes, but also lives in an
       /// imaginary context; for example, a declaration of a member variable
       /// inside an implicit template instantiation has its source range
@@ -177,16 +224,23 @@ public:
     };
     /// \brief Constructs a physical `Range` for the given `clang::SourceRange`.
     Range(const clang::SourceRange &R, const ClaimToken *T)
-        : Kind(RangeKind::Physical), PhysicalRange(R), Context(T, "") {}
+        : Kind(RangeKind::Physical), PhysicalRange(R), Context(T, "") {
+      CHECK(R.getBegin().isValid());
+    }
     /// \brief Constructs a `Range` with some physical location, but specific to
     /// the context of some semantic node.
     Range(const clang::SourceRange &R, const NodeId &C)
-        : Kind(RangeKind::Wraith), PhysicalRange(R), Context(C) {}
+        : Kind(RangeKind::Wraith), PhysicalRange(R), Context(C) {
+      CHECK(R.getBegin().isValid());
+    }
     /// \brief Constructs a new `Range` in the context of an existing
     /// `Range`, but with a different physical location.
     Range(const Range &R, const clang::SourceRange &NR)
-        : Kind(R.Kind), PhysicalRange(NR), Context(R.Context) {}
-
+        : Kind(R.Kind), PhysicalRange(NR), Context(R.Context) {
+      CHECK(NR.getBegin().isValid());
+    }
+    /// \brief Constructs a new `Implicit` `Range` keyed on a semantic object.
+    explicit Range(const NodeId &C) : Kind(RangeKind::Implicit), Context(C) {}
     RangeKind Kind;
     clang::SourceRange PhysicalRange;
     NodeId Context;
@@ -210,6 +264,12 @@ public:
     std::string Path;
     /// \brief The `NameClass` of this name.
     NameEqClass EqClass;
+    /// \brief Whether this name is known to be hidden.
+    ///
+    /// Most useful names can be uttered from the global namespace.
+    /// Some names, like the names of local variables, cannot. When we know
+    /// a name is unutterable, this flag is set.
+    bool Hidden = false;
     /// \brief Returns a string representation of this `NameId`.
     std::string ToString() const;
   };
@@ -249,6 +309,22 @@ public:
   /// \brief Returns a claim token that provides no additional information.
   virtual const ClaimToken *getDefaultClaimToken() const = 0;
 
+  /// \brief Returns a claim token for namespaces declared at `Loc`.
+  /// \param Loc The declaration site of the namespace.
+  virtual const ClaimToken *getNamespaceClaimToken(clang::SourceLocation Loc) {
+    return getDefaultClaimToken();
+  }
+
+  /// \brief Returns a claim token for anonymous namespaces declared at `Loc`.
+  /// \param Loc The declaration site of the anonymous namespace.
+  virtual const ClaimToken *
+  getAnonymousNamespaceClaimToken(clang::SourceLocation Loc) {
+    return getDefaultClaimToken();
+  }
+
+  /// \brief Returns whether experimental lossy claiming is enabled.
+  virtual bool lossy_claiming() const { return false; }
+
   /// \brief Returns the `NodeId` for the builtin type or type constructor named
   /// by `Spelling`.
   ///
@@ -273,9 +349,11 @@ public:
   /// `using Alias = ty` instance).
   /// \param AliasName a `NameId` for the alias name.
   /// \param AliasedType a `NodeId` corresponding to the aliased type.
+  /// \param Format a format string for the alias.
   /// \return the `NodeId` for the type alias node this definition defines.
   virtual NodeId recordTypeAliasNode(const NameId &AliasName,
-                                     const NodeId &AliasedType) = 0;
+                                     const NodeId &AliasedType,
+                                     const std::string &Format) = 0;
 
   /// \brief Returns the ID for a nominal type node (such as a struct,
   /// typedef or enum).
@@ -286,8 +364,12 @@ public:
   /// \brief Records a type node for some nominal type (such as a struct,
   /// typedef or enum), returning its ID.
   /// \param TypeName a `NameId` corresponding to a nominal type.
+  /// \param Format a format string for the alias.
+  /// \param Parent if non-null, the parent node of this nominal type.
   /// \return the `NodeId` for the type node corresponding to `TypeName`.
-  virtual NodeId recordNominalTypeNode(const NameId &TypeName) = 0;
+  virtual NodeId recordNominalTypeNode(const NameId &TypeName,
+                                       const std::string &Format,
+                                       const NodeId *Parent) = 0;
 
   /// \brief Records a type application node, returning its ID.
   /// \note This is the elimination form for the `abs` node.
@@ -298,6 +380,12 @@ public:
   /// \return The application's result's ID.
   virtual NodeId recordTappNode(const NodeId &TyconId,
                                 const std::vector<const NodeId *> &Params) = 0;
+
+  /// \brief Records a sigma node, returning its ID.
+  /// \param Params The `NodeId`s of the types to include.
+  /// \return The result's ID.
+  virtual NodeId
+  recordTsigmaNode(const std::vector<const NodeId *> &Params) = 0;
 
   enum class RecordKind { Struct, Class, Union };
 
@@ -335,28 +423,20 @@ public:
   /// \param Node The NodeId of the record.
   /// \param Kind Whether this record is a struct, class, or union.
   /// \param RecordCompleteness Whether the record is complete.
+  /// \param Format A format string for this record.
   virtual void recordRecordNode(const NodeId &Node, RecordKind Kind,
-                                Completeness RecordCompleteness) {}
+                                Completeness RecordCompleteness,
+                                const std::string &Format) {}
 
   /// \brief Records a node representing a function.
   /// \param Node The NodeId of the function.
   /// \param FunctionCompleteness Whether the function is complete.
   /// \param Subkind The subkind of the function.
+  /// \param Format A format string for this function.
   virtual void recordFunctionNode(const NodeId &Node,
                                   Completeness FunctionCompleteness,
-                                  FunctionSubkind Subkind) {}
-
-  /// \brief Records a node representing a callable, an object that can
-  /// appear as the target of a call expression.
-  /// \param Node The NodeId of the callable.
-  ///
-  /// Various language-level objects may be deemed 'callable' (like functions
-  /// or classes with operator()). This abstraction allows call relationships
-  /// to be recorded in the graph in a consistent way regardless of the
-  /// particular kind of object being called.
-  ///
-  /// \sa recordCallableAsEdge
-  virtual void recordCallableNode(const NodeId &Node) {}
+                                  FunctionSubkind Subkind,
+                                  const std::string &Format) {}
 
   /// \brief Describes whether an enum is scoped (`enum class`).
   enum class EnumKind {
@@ -427,12 +507,22 @@ public:
   /// \param DeclNode The identifier for this particular element.
   /// \param Compl The completeness of this variable declaration.
   /// \param Subkind Which kind of variable declaration this is.
+  /// \param Format A format string for this variable.
   // TODO(zarko): We should make note of the storage-class-specifier (dcl.stc)
   // of the variable, which is a property the variable itself and not of its
   // type.
   virtual void recordVariableNode(const NameId &DeclName,
                                   const NodeId &DeclNode, Completeness Compl,
-                                  VariableSubkind Subkind) {}
+                                  VariableSubkind Subkind,
+                                  const std::string &Format) {}
+
+  /// \brief Records that a namespace has been declared.
+  /// \param DeclName The name to which this element is being bound.
+  /// \param DeclNode The identifier for this particular element.
+  /// \param Format A format string for this namespace.
+  virtual void recordNamespaceNode(const NameId &DeclName,
+                                   const NodeId &DeclNode,
+                                   const std::string &Format) {}
 
   // TODO(zarko): recordExpandedTypeEdge -- records that a type was seen
   // to have some canonical type during a compilation. (This is a 'canonical'
@@ -466,6 +556,12 @@ public:
   virtual void recordDefinitionRangeWithBinding(const Range &SourceRange,
                                                 const Range &BindingRange,
                                                 const NodeId &DefnId) {}
+
+  /// \brief Records that a particular string contains documentation for
+  /// the node called `DocId`, possibly containing inner links to other nodes.
+  virtual void recordDocumentationText(const NodeId &DocId,
+                                       const std::string &DocText,
+                                       const std::vector<NodeId> &DocLinks) {}
 
   /// \brief Records that a particular `Range` contains some documentation
   /// for the node called `DocId`.
@@ -549,23 +645,17 @@ public:
   virtual void recordInstEdge(const NodeId &TermNodeId, const NodeId &AbsNodeId,
                               Confidence Conf) {}
 
-  /// \brief Records that one node participates in the call graph as a
-  /// particular `Callable`.
-  ///
-  /// This relationship allows the indexer to abstract the notion of
-  /// callability from its embodiment in particular callable objects
-  /// (such as functions or records that define operator()).
-  ///
-  /// \param ToCallId The specific node that may be called.
-  /// \param CallableAsId The node representing `ToCallId` in the call graph.
-  virtual void recordCallableAsEdge(const NodeId &ToCallId,
-                                    const NodeId &CallableAsId) {}
+  /// \brief Records that some overrider overrides a base object.
+  /// \param Overrider the object doing the overriding
+  /// \param BaseObject the object being overridden
+  virtual void recordOverridesEdge(const NodeId &Overrider,
+                                   const NodeId &BaseObject) {}
 
-  /// \brief Records that a callable is called at a particular location.
+  /// \brief Records that a node is called at a particular location.
   /// \param CallLoc The `Range` responsible for making the call.
   /// \param CallerId The scope to be held responsible for making the call;
   /// for example, a function.
-  /// \param CalleeId The callable being called.
+  /// \param CalleeId The node being called.
   virtual void recordCallEdge(const Range &SourceRange, const NodeId &CallerId,
                               const NodeId &CalleeId) {}
 
@@ -685,6 +775,22 @@ public:
   /// \sa pushFile
   virtual void popFile() {}
 
+  /// \brief Returns true if the given source location is part of the
+  /// main source file (e.g., it was written in the main source file or
+  /// a textual include, but not a header include or a textual include from
+  /// a header include).
+  /// \pre Preprocessing is complete.
+  virtual bool isMainSourceFileRelatedLocation(clang::SourceLocation Location) {
+    // Conservatively return true.
+    return true;
+  }
+
+  /// \brief Append a string representation of the identifier of the main
+  /// source file to the given stream.
+  /// \pre Preprocessing is complete.
+  virtual void
+  AppendMainSourceFileIdentifierToStream(llvm::raw_ostream &Ostream) {}
+
   /// \brief Checks whether this `GraphObserver` should emit data for some
   /// `NodeId` and its descendants.
   ///
@@ -739,12 +845,8 @@ public:
   }
 
   /// \brief Append a string representation of `Range` to `Ostream`.
-  /// \return true on success, false if the range was invalid.
-  virtual bool AppendRangeToStream(llvm::raw_ostream &Ostream,
+  virtual void AppendRangeToStream(llvm::raw_ostream &Ostream,
                                    const Range &Range) {
-    if (Range.PhysicalRange.isInvalid()) {
-      return false;
-    }
     Range.PhysicalRange.getBegin().print(Ostream, *SourceManager);
     Ostream << "@";
     Range.PhysicalRange.getEnd().print(Ostream, *SourceManager);
@@ -752,7 +854,6 @@ public:
       Ostream << "@";
       Ostream << Range.Context.ToClaimedString();
     }
-    return true;
   }
 
   virtual ~GraphObserver() = 0;
@@ -763,10 +864,13 @@ public:
 
   clang::Preprocessor *getPreprocessor() { return Preprocessor; }
 
+  const ProfilingCallback &getProfilingCallback() { return ReportProfileEvent; }
+
 protected:
   clang::SourceManager *SourceManager = nullptr;
   clang::LangOptions *LangOptions = nullptr;
   clang::Preprocessor *Preprocessor = nullptr;
+  ProfilingCallback ReportProfileEvent = [](const char *, ProfilingEvent) {};
 };
 
 inline GraphObserver::~GraphObserver() {}
@@ -801,8 +905,8 @@ public:
     return NodeId(getDefaultClaimToken(), "");
   }
 
-  NodeId recordTypeAliasNode(const NameId &AliasName,
-                             const NodeId &AliasedType) override {
+  NodeId recordTypeAliasNode(const NameId &AliasName, const NodeId &AliasedType,
+                             const std::string &Format) override {
     return NodeId(getDefaultClaimToken(), "");
   }
 
@@ -810,7 +914,13 @@ public:
     return NodeId(getDefaultClaimToken(), "");
   }
 
-  NodeId recordNominalTypeNode(const NameId &TypeName) override {
+  NodeId recordNominalTypeNode(const NameId &TypeName,
+                               const std::string &Format,
+                               const NodeId *Parent) override {
+    return NodeId(getDefaultClaimToken(), "");
+  }
+
+  NodeId recordTsigmaNode(const std::vector<const NodeId *> &Params) override {
     return NodeId(getDefaultClaimToken(), "");
   }
 

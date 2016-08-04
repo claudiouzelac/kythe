@@ -23,14 +23,12 @@ import (
 	"io/ioutil"
 	"log"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 
 	"kythe.io/kythe/go/platform/vfs"
 	"kythe.io/kythe/go/services/filetree"
-	"kythe.io/kythe/go/services/search"
 	"kythe.io/kythe/go/services/xrefs"
 	"kythe.io/kythe/go/util/kytheuri"
 	"kythe.io/kythe/go/util/schema"
@@ -38,16 +36,14 @@ import (
 	"golang.org/x/net/context"
 
 	ftpb "kythe.io/kythe/proto/filetree_proto"
-	spb "kythe.io/kythe/proto/storage_proto"
 	xpb "kythe.io/kythe/proto/xref_proto"
 )
 
 var (
 	ctx = context.Background()
 
-	xs  xrefs.Service
-	ft  filetree.Service
-	idx search.Service
+	xs xrefs.Service
+	ft filetree.Service
 
 	// ls flags
 	lsURIs    bool
@@ -59,30 +55,26 @@ var (
 	factSizeThreshold int
 
 	// edges flags
+	dotGraph    bool
 	countOnly   bool
 	targetsOnly bool
 	edgeKinds   string
 	pageToken   string
 	pageSize    int
 
-	// source/refs flags
+	// docs flags
+
+	// source/decor flags
 	decorSpan string
 
-	// refs flags
-	dirtyFile string
-	refFormat string
+	// decor flags
+	targetDefs bool
+	dirtyFile  string
+	refFormat  string
 
 	// xrefs flags
-	defKind, refKind, docKind string
-	relatedNodes              bool
-
-	// search flags
-	suffixWildcard string
-	corpus         string
-	root           string
-	path           string
-	language       string
-	signature      string
+	defKind, declKind, refKind, docKind, callerKind string
+	relatedNodes                                    bool
 
 	spanHelp = `Limit results to this span (e.g. "10-30", "b1462-b1847", "3:5-3:10")
       Formats:
@@ -124,7 +116,7 @@ var (
 				flag.Usage()
 				os.Exit(1)
 			}
-			path = filepath.Join("/", path)
+			path = filetree.CleanDirPath(path)
 			req := &ftpb.DirectoryRequest{
 				Corpus: corpus,
 				Root:   root,
@@ -134,8 +126,6 @@ var (
 			dir, err := ft.Directory(ctx, req)
 			if err != nil {
 				return err
-			} else if dir == nil {
-				return fmt.Errorf("no such directory: %q in corpus %q (root %q)", path, corpus, root)
 			}
 
 			if filesOnly {
@@ -147,9 +137,10 @@ var (
 			return displayDirectory(dir)
 		})
 
-	cmdEdges = newCommand("edges", "[--count_only] [--kinds edgeKind1,edgeKind2,...] [--page_token token] [--page_size num] <ticket>",
+	cmdEdges = newCommand("edges", "[--count_only | --targets_only | --graphvizviz] [--kinds edgeKind1,edgeKind2,...] [--page_token token] [--page_size num] <ticket>",
 		"Retrieve outward edges from a node",
 		func(flag *flag.FlagSet) {
+			flag.BoolVar(&dotGraph, "graphviz", false, "Print resulting edges as a dot graph")
 			flag.BoolVar(&countOnly, "count_only", false, "Only print counts per edge kind")
 			flag.BoolVar(&targetsOnly, "targets_only", false, "Only display edge targets")
 			flag.StringVar(&edgeKinds, "kinds", "", "Comma-separated list of edge kinds to return (default returns all)")
@@ -157,13 +148,26 @@ var (
 			flag.IntVar(&pageSize, "page_size", 0, "Maximum number of edges returned (0 lets the service use a sensible default)")
 		},
 		func(flag *flag.FlagSet) error {
+			if countOnly && targetsOnly {
+				return errors.New("--count_only and --targets_only are mutually exclusive")
+			} else if countOnly && dotGraph {
+				return errors.New("--count_only and --graphviz are mutually exclusive")
+			} else if targetsOnly && dotGraph {
+				return errors.New("--targets_only and --graphviz are mutually exclusive")
+			}
+
 			req := &xpb.EdgesRequest{
 				Ticket:    flag.Args(),
 				PageToken: pageToken,
 				PageSize:  int32(pageSize),
 			}
 			if edgeKinds != "" {
-				req.Kind = strings.Split(edgeKinds, ",")
+				for _, kind := range strings.Split(edgeKinds, ",") {
+					req.Kind = append(req.Kind, expandEdgeKind(kind))
+				}
+			}
+			if dotGraph {
+				req.Filter = []string{"**"}
 			}
 			logRequest(req)
 			reply, err := xs.Edges(ctx, req)
@@ -176,32 +180,50 @@ var (
 			if countOnly {
 				return displayEdgeCounts(reply)
 			} else if targetsOnly {
-				return displayTargets(reply.EdgeSet)
+				return displayTargets(reply.EdgeSets)
+			} else if dotGraph {
+				return displayEdgeGraph(reply)
 			}
 			return displayEdges(reply)
+		})
+
+	cmdDocs = newCommand("docs", "<ticket>",
+		"Retrieve documentation for the given node",
+		func(flag *flag.FlagSet) {},
+		func(flag *flag.FlagSet) error {
+			fmt.Fprintf(os.Stderr, "Warning: The Documentation API is experimental and may be slow.")
+			req := &xpb.DocumentationRequest{
+				Ticket: flag.Args(),
+			}
+			logRequest(req)
+			reply, err := xs.Documentation(ctx, req)
+			if err != nil {
+				return err
+			}
+			return displayDocumentation(reply)
 		})
 
 	cmdXRefs = newCommand("xrefs", "[--definitions kind] [--references kind] [--documentation kind] [--related_nodes] [--page_token token] [--page_size num] <ticket>",
 		"Retrieve the global cross-references of the given node",
 		func(flag *flag.FlagSet) {
 			flag.StringVar(&defKind, "definitions", "all", "Kind of definitions to return (kinds: all, binding, full, or none)")
-			flag.StringVar(&refKind, "references", "all", "Kind of references to return (kinds: all or none)")
+			flag.StringVar(&declKind, "declarations", "all", "Kind of declarations to return (kinds: all or none)")
+			flag.StringVar(&refKind, "references", "noncall", "Kind of references to return (kinds: all, noncall, call, or none)")
 			flag.StringVar(&docKind, "documentation", "all", "Kind of documentation to return (kinds: all or none)")
+			flag.StringVar(&callerKind, "callers", "none", "Kind of callers to return (kinds: direct, overrides, or none)")
 			flag.BoolVar(&relatedNodes, "related_nodes", false, "Whether to request related nodes")
 
 			flag.StringVar(&pageToken, "page_token", "", "CrossReferences page token")
 			flag.IntVar(&pageSize, "page_size", 0, "Maximum number of cross-references returned (0 lets the service use a sensible default)")
 		},
 		func(flag *flag.FlagSet) error {
-			log.Println("WARNING: this API is currently experimental")
-
 			req := &xpb.CrossReferencesRequest{
 				Ticket:    flag.Args(),
 				PageToken: pageToken,
 				PageSize:  int32(pageSize),
 			}
 			if relatedNodes {
-				req.Filter = []string{schema.NodeKindFact}
+				req.Filter = []string{schema.NodeKindFact, schema.SubkindFact}
 			}
 			switch defKind {
 			case "all":
@@ -215,9 +237,21 @@ var (
 			default:
 				return fmt.Errorf("unknown definition kind: %q", defKind)
 			}
+			switch declKind {
+			case "all":
+				req.DeclarationKind = xpb.CrossReferencesRequest_ALL_DECLARATIONS
+			case "none":
+				req.DeclarationKind = xpb.CrossReferencesRequest_NO_DECLARATIONS
+			default:
+				return fmt.Errorf("unknown declaration kind: %q", declKind)
+			}
 			switch refKind {
 			case "all":
 				req.ReferenceKind = xpb.CrossReferencesRequest_ALL_REFERENCES
+			case "noncall":
+				req.ReferenceKind = xpb.CrossReferencesRequest_NON_CALL_REFERENCES
+			case "call":
+				req.ReferenceKind = xpb.CrossReferencesRequest_CALL_REFERENCES
 			case "none":
 				req.ReferenceKind = xpb.CrossReferencesRequest_NO_REFERENCES
 			default:
@@ -230,6 +264,16 @@ var (
 				req.DocumentationKind = xpb.CrossReferencesRequest_NO_DOCUMENTATION
 			default:
 				return fmt.Errorf("unknown documentation kind: %q", docKind)
+			}
+			switch callerKind {
+			case "direct":
+				req.CallerKind = xpb.CrossReferencesRequest_DIRECT_CALLERS
+			case "overrides":
+				req.CallerKind = xpb.CrossReferencesRequest_OVERRIDE_CALLERS
+			case "none":
+				req.CallerKind = xpb.CrossReferencesRequest_NO_CALLERS
+			default:
+				return fmt.Errorf("unknown caller kind: %q", docKind)
 			}
 			logRequest(req)
 			reply, err := xs.CrossReferences(ctx, req)
@@ -265,7 +309,7 @@ var (
 			if err != nil {
 				return err
 			}
-			return displayNodes(reply.Node)
+			return displayNodes(reply.Nodes)
 		})
 
 	cmdSource = newCommand("source", "[--span span] <file-ticket>",
@@ -299,37 +343,39 @@ var (
 			return displaySource(reply)
 		})
 
-	cmdRefs = newCommand("refs", "[--format spec] [--dirty file] [--span span] <file-ticket>",
-		"List a file's anchor references",
+	cmdDecor = newCommand("decor", "[--format spec] [--dirty file] [--span span] <file-ticket>",
+		"List a file's anchor decorations",
 		func(flag *flag.FlagSet) {
 			// TODO(schroederc): add option to look for dirty files based on file-ticket path and a directory root
 			flag.StringVar(&dirtyFile, "dirty", "", "Send the given file as the dirty buffer for patching references")
 			flag.StringVar(&refFormat, "format", "@edgeKind@\t@^line@:@^col@-@$line@:@$col@\t@nodeKind@\t@target@",
 				`Format for each decoration result.
       Format Markers:
-        @source@   -- ticket of anchor source node
-        @target@   -- ticket of referenced target node
-        @edgeKind@ -- edge kind from anchor node to its referenced target
-        @nodeKind@ -- node kind of referenced target
-        @subkind@  -- subkind of referenced target
-        @^offset@  -- anchor source's starting byte-offset
-        @^line@    -- anchor source's starting line
-        @^col@     -- anchor source's starting column offset
-        @$offset@  -- anchor source's ending byte-offset
-        @$line@    -- anchor source's ending line
-        @$col@     -- anchor source's ending column offset`)
+        @source@    -- ticket of anchor source node
+        @target@    -- ticket of referenced target node
+        @targetDef@ -- ticket of referenced target's definition
+        @edgeKind@  -- edge kind from anchor node to its referenced target
+        @nodeKind@  -- node kind of referenced target
+        @subkind@   -- subkind of referenced target
+        @^offset@   -- anchor source's starting byte-offset
+        @^line@     -- anchor source's starting line
+        @^col@      -- anchor source's starting column offset
+        @$offset@   -- anchor source's ending byte-offset
+        @$line@     -- anchor source's ending line
+        @$col@      -- anchor source's ending column offset`)
 			flag.StringVar(&decorSpan, "span", "", spanHelp)
+			flag.BoolVar(&targetDefs, "target_definitions", false, "Whether to request definitions (@targetDef@ format marker) for each reference's target")
 		},
 		func(flag *flag.FlagSet) error {
 			req := &xpb.DecorationsRequest{
 				Location: &xpb.Location{
 					Ticket: flag.Arg(0),
 				},
-				References: true,
+				References:        true,
+				TargetDefinitions: targetDefs,
 				Filter: []string{
 					schema.NodeKindFact,
 					schema.SubkindFact,
-					schema.AnchorLocFilter, // TODO(schroederc): remove this backwards-compatibility fix
 				},
 			}
 			if dirtyFile != "" {
@@ -355,8 +401,6 @@ var (
 				req.Location.Kind = xpb.Location_SPAN
 				req.Location.Start = start
 				req.Location.End = end
-			} else {
-				req.SourceText = true // TODO(schroederc): remove need for this
 			}
 
 			logRequest(req)
@@ -365,91 +409,24 @@ var (
 				return err
 			}
 
-			if !req.SourceText {
-				// We need to grab the full SourceText to normalize each anchor's
-				// location, but when given a --span, we don't receive the full text and
-				// we require a separate Nodes call.
-				// TODO(schroederc): add Locations for each DecorationsReply_Reference
-
-				nodesReq := &xpb.NodesRequest{
-					Ticket: []string{req.Location.Ticket},
-					Filter: []string{schema.TextFact, schema.TextEncodingFact},
-				}
-				logRequest(nodesReq)
-				fileNodeReply, err := xs.Nodes(ctx, nodesReq)
-				if err != nil {
-					return err
-				}
-				for _, n := range fileNodeReply.Node {
-					if n.Ticket != req.Location.Ticket {
-						log.Printf("WARNING: received unrequested node: %q", n.Ticket)
-						continue
-					}
-					for _, f := range n.Fact {
-						switch f.Name {
-						case schema.TextFact:
-							reply.SourceText = f.Value
-						case schema.TextEncodingFact:
-							reply.Encoding = string(f.Value)
-						}
-					}
-				}
-			}
-
-			return displayReferences(req.DirtyBuffer, reply)
-		})
-
-	cmdSearch = newCommand("search", "[--corpus c] [--sig s] [--root r] [--lang l] [--path p] [factName factValue]...",
-		"Search for nodes based on partial components and fact values.",
-		func(flag *flag.FlagSet) {
-			flag.StringVar(&suffixWildcard, "suffix_wildcard", "%", "Suffix wildcard for search values (optional)")
-			flag.StringVar(&corpus, "corpus", "", "Limit results to nodes with the given corpus (optional)")
-			flag.StringVar(&root, "root", "", "Limit results to nodes with the given root (optional)")
-			flag.StringVar(&path, "path", "", "Limit results to nodes with the given path (optional)")
-			flag.StringVar(&signature, "sig", "", "Limit results to nodes with the given signature (optional)")
-			flag.StringVar(&language, "lang", "", "Limit results to nodes with the given language (optional)")
-		},
-		func(flag *flag.FlagSet) error {
-			if len(flag.Args())%2 != 0 {
-				return fmt.Errorf("given odd number of arguments (%d): %v", len(flag.Args()), flag.Args())
-			}
-
-			req := &spb.SearchRequest{
-				Partial: &spb.VName{
-					Corpus:    strings.TrimSuffix(corpus, suffixWildcard),
-					Signature: strings.TrimSuffix(signature, suffixWildcard),
-					Root:      strings.TrimSuffix(root, suffixWildcard),
-					Path:      strings.TrimSuffix(path, suffixWildcard),
-					Language:  strings.TrimSuffix(language, suffixWildcard),
-				},
-			}
-			req.PartialPrefix = &spb.VNameMask{
-				Corpus:    req.Partial.Corpus != corpus,
-				Signature: req.Partial.Signature != signature,
-				Root:      req.Partial.Root != root,
-				Path:      req.Partial.Path != path,
-				Language:  req.Partial.Language != language,
-			}
-			for i := 0; i < len(flag.Args()); i = i + 2 {
-				if flag.Arg(i) == schema.TextFact {
-					log.Printf("WARNING: Large facts such as %s are not likely to be indexed", schema.TextFact)
-				}
-				v := strings.TrimSuffix(flag.Arg(i+1), suffixWildcard)
-				req.Fact = append(req.Fact, &spb.SearchRequest_Fact{
-					Name:   flag.Arg(i),
-					Value:  []byte(v),
-					Prefix: v != flag.Arg(i+1),
-				})
-			}
-
-			logRequest(req)
-			reply, err := idx.Search(ctx, req)
-			if err != nil {
-				return err
-			}
-			return displaySearch(reply)
+			return displayDecorations(reply)
 		})
 )
+
+// expandEdgeKind prefixes unrooted (not starting with "/") edge kinds with the
+// standard Kythe edge prefix ("/kythe/edge/").
+func expandEdgeKind(kind string) string {
+	ck := schema.Canonicalize(kind)
+	if strings.HasPrefix(ck, "/") {
+		return kind
+	}
+
+	expansion := schema.EdgePrefix + ck
+	if schema.EdgeDirection(kind) == schema.Reverse {
+		return schema.MirrorEdge(expansion)
+	}
+	return expansion
+}
 
 var (
 	byteOffsetPointRE = regexp.MustCompile(`^b(\d+)$`)

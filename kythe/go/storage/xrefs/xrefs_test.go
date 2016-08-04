@@ -17,11 +17,12 @@
 package xrefs
 
 import (
-	"reflect"
+	"fmt"
 	"sort"
 	"testing"
 
 	"kythe.io/kythe/go/services/graphstore"
+	"kythe.io/kythe/go/services/xrefs"
 	"kythe.io/kythe/go/storage/inmemory"
 	"kythe.io/kythe/go/test/testutil"
 	"kythe.io/kythe/go/util/kytheuri"
@@ -56,6 +57,7 @@ var (
 		}},
 		{sig("signature"), facts(schema.NodeKindFact, "test"), map[string][]*spb.VName{
 			schema.MirrorEdge("someEdgeKind"): {sig("sig2")},
+			schema.ParamEdge:                  {sig("sig2"), sig("someParameter")},
 		}},
 		{testAnchorVName, facts(
 			schema.AnchorEndFact, "4",
@@ -82,7 +84,7 @@ func TestNodes(t *testing.T) {
 		t.Fatalf("Error fetching nodes for %+v: %v", nodesToTickets(testNodes), err)
 	}
 	expected := nodesToInfos(testNodes)
-	if err := testutil.DeepEqual(expected, sortInfos(reply.Node)); err != nil {
+	if err := testutil.DeepEqual(expected, reply.Nodes); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -99,14 +101,14 @@ func TestEdges(t *testing.T) {
 	}
 
 	expectedEdges := nodesToEdgeSets(testNodes)
-	if !reflect.DeepEqual(sortEdgeSets(reply.EdgeSet), expectedEdges) {
-		t.Errorf("Got %v; Expected edgeSets %v", reply.EdgeSet, expectedEdges)
+	if err := testutil.DeepEqual(expectedEdges, sortEdgeSets(reply.EdgeSets)); err != nil {
+		t.Error(err)
 	}
 
 	nodesWithEdges := testNodes[1:]
 	expectedInfos := nodesToInfos(nodesWithEdges)
-	if !reflect.DeepEqual(sortInfos(reply.Node), expectedInfos) {
-		t.Errorf("Got %v; Expected nodes %v", reply.Node, expectedInfos)
+	if err := testutil.DeepEqual(expectedInfos, reply.Nodes); err != nil {
+		t.Error(err)
 	}
 }
 
@@ -154,8 +156,26 @@ func TestDecorations(t *testing.T) {
 	}
 
 	expectedNodes := nodesToInfos(testNodes[4:6])
-	if err := testutil.DeepEqual(expectedNodes, sortInfos(reply.Node)); err != nil {
+	if err := testutil.DeepEqual(expectedNodes, reply.Nodes); err != nil {
 		t.Error(err)
+	}
+}
+
+func TestCallers(t *testing.T) {
+	xs := newService(t, testEntries)
+
+	reply, err := xs.Callers(ctx, &xpb.CallersRequest{})
+	if reply != nil || err == nil {
+		t.Fatalf("Callers expected to fail")
+	}
+}
+
+func TestDocumentation(t *testing.T) {
+	xs := newService(t, testEntries)
+
+	reply, err := xs.Documentation(ctx, &xpb.DocumentationRequest{})
+	if reply != nil || err == nil {
+		t.Fatalf("Documentation expected to fail")
 	}
 }
 
@@ -191,32 +211,30 @@ type node struct {
 
 func (n *node) Info() *xpb.NodeInfo {
 	info := &xpb.NodeInfo{
-		Ticket: kytheuri.ToString(n.Source),
+		Facts: make(map[string][]byte, len(n.Facts)),
 	}
 	for name, val := range n.Facts {
-		info.Fact = append(info.Fact, &xpb.Fact{
-			Name:  name,
-			Value: []byte(val),
-		})
+		info.Facts[name] = []byte(val)
 	}
 	return info
 }
 
 func (n *node) EdgeSet() *xpb.EdgeSet {
-	var groups []*xpb.EdgeSet_Group
+	groups := make(map[string]*xpb.EdgeSet_Group)
 	for kind, targets := range n.Edges {
-		var tickets []string
-		for _, target := range targets {
-			tickets = append(tickets, kytheuri.ToString(target))
+		var edges []*xpb.EdgeSet_Group_Edge
+		for ordinal, target := range targets {
+			edges = append(edges, &xpb.EdgeSet_Group_Edge{
+				TargetTicket: kytheuri.ToString(target),
+				Ordinal:      int32(ordinal),
+			})
 		}
-		groups = append(groups, &xpb.EdgeSet_Group{
-			Kind:         kind,
-			TargetTicket: tickets,
-		})
+		groups[kind] = &xpb.EdgeSet_Group{
+			Edge: edges,
+		}
 	}
 	return &xpb.EdgeSet{
-		SourceTicket: kytheuri.ToString(n.Source),
-		Group:        groups,
+		Groups: groups,
 	}
 }
 
@@ -235,31 +253,31 @@ func nodesToEntries(nodes []*node) []*spb.Entry {
 			entries = append(entries, nodeFact(n.Source, fact, val))
 		}
 		for edgeKind, targets := range n.Edges {
-			for _, target := range targets {
-				entries = append(entries, edgeFact(n.Source, edgeKind, target))
+			for ordinal, target := range targets {
+				entries = append(entries, edgeFact(n.Source, edgeKind, ordinal, target))
 			}
 		}
 	}
 	return entries
 }
 
-func nodesToInfos(nodes []*node) []*xpb.NodeInfo {
-	var infos []*xpb.NodeInfo
+func nodesToInfos(nodes []*node) map[string]*xpb.NodeInfo {
+	m := make(map[string]*xpb.NodeInfo)
 	for _, n := range nodes {
-		infos = append(infos, n.Info())
+		m[kytheuri.ToString(n.Source)] = n.Info()
 	}
-	return sortInfos(infos)
+	return m
 }
 
-func nodesToEdgeSets(nodes []*node) []*xpb.EdgeSet {
-	var sets []*xpb.EdgeSet
+func nodesToEdgeSets(nodes []*node) map[string]*xpb.EdgeSet {
+	sets := make(map[string]*xpb.EdgeSet)
 	for _, n := range nodes {
 		set := n.EdgeSet()
-		if len(set.Group) > 0 {
-			sets = append(sets, set)
+		if len(set.Groups) > 0 {
+			sets[kytheuri.ToString(n.Source)] = set
 		}
 	}
-	return sortEdgeSets(sets)
+	return sets
 }
 
 func sig(sig string) *spb.VName {
@@ -282,57 +300,20 @@ func nodeFact(vname *spb.VName, fact, val string) *spb.Entry {
 	}
 }
 
-func edgeFact(source *spb.VName, kind string, target *spb.VName) *spb.Entry {
+func edgeFact(source *spb.VName, kind string, ordinal int, target *spb.VName) *spb.Entry {
+	if ordinal > 0 {
+		kind = fmt.Sprintf("%s.%d", kind, ordinal)
+	}
 	return &spb.Entry{
 		Source:    source,
 		Target:    target,
 		EdgeKind:  kind,
 		FactName:  "/",
-		FactValue: []byte{},
+		FactValue: nil,
 	}
 }
 
 ////// Everything below is for sorting results to ensure order doesn't matter
-
-type sortedFacts []*xpb.Fact
-
-func (h sortedFacts) Len() int { return len(h) }
-func (h sortedFacts) Less(i, j int) bool {
-	return h[i].Name < h[j].Name
-}
-func (h sortedFacts) Swap(i, j int) {
-	h[i], h[j] = h[j], h[i]
-}
-
-type sortedGroups []*xpb.EdgeSet_Group
-
-func (h sortedGroups) Len() int { return len(h) }
-func (h sortedGroups) Less(i, j int) bool {
-	return h[i].Kind < h[j].Kind
-}
-func (h sortedGroups) Swap(i, j int) {
-	h[i], h[j] = h[j], h[i]
-}
-
-type sortedEdgeSets []*xpb.EdgeSet
-
-func (h sortedEdgeSets) Len() int { return len(h) }
-func (h sortedEdgeSets) Less(i, j int) bool {
-	return h[i].SourceTicket < h[j].SourceTicket
-}
-func (h sortedEdgeSets) Swap(i, j int) {
-	h[i], h[j] = h[j], h[i]
-}
-
-type sortedNodeInfos []*xpb.NodeInfo
-
-func (h sortedNodeInfos) Len() int { return len(h) }
-func (h sortedNodeInfos) Less(i, j int) bool {
-	return h[i].Ticket < h[j].Ticket
-}
-func (h sortedNodeInfos) Swap(i, j int) {
-	h[i], h[j] = h[j], h[i]
-}
 
 type sortedReferences []*xpb.DecorationsReply_Reference
 
@@ -354,20 +335,13 @@ func (h sortedReferences) Swap(i, j int) {
 	h[i], h[j] = h[j], h[i]
 }
 
-func sortEdgeSets(sets []*xpb.EdgeSet) []*xpb.EdgeSet {
-	sort.Sort(sortedEdgeSets(sets))
+func sortEdgeSets(sets map[string]*xpb.EdgeSet) map[string]*xpb.EdgeSet {
 	for _, set := range sets {
-		sort.Sort(sortedGroups(set.Group))
+		for _, g := range set.Groups {
+			sort.Sort(xrefs.ByOrdinal(g.Edge))
+		}
 	}
 	return sets
-}
-
-func sortInfos(infos []*xpb.NodeInfo) []*xpb.NodeInfo {
-	sort.Sort(sortedNodeInfos(infos))
-	for _, info := range infos {
-		sort.Sort(sortedFacts(info.Fact))
-	}
-	return infos
 }
 
 func sortRefs(refs []*xpb.DecorationsReply_Reference) []*xpb.DecorationsReply_Reference {

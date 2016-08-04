@@ -17,36 +17,34 @@
 package com.google.devtools.kythe.analyzers.java;
 
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.collect.Lists;
 import com.google.devtools.kythe.platform.java.helpers.SyntaxPreservingScanner;
 import com.google.devtools.kythe.platform.java.helpers.SyntaxPreservingScanner.CommentToken;
 import com.google.devtools.kythe.util.Span;
-
 import com.sun.tools.javac.parser.Tokens.Token;
 import com.sun.tools.javac.parser.Tokens.TokenKind;
 import com.sun.tools.javac.tree.EndPosTable;
 import com.sun.tools.javac.tree.JCTree;
 import com.sun.tools.javac.tree.JCTree.JCCompilationUnit;
 import com.sun.tools.javac.util.Context;
-import com.sun.tools.javac.util.Name;
-
 import java.io.IOException;
 import java.io.OutputStream;
 import java.io.OutputStreamWriter;
 import java.nio.charset.Charset;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Deque;
 import java.util.HashMap;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.SortedSet;
 import java.util.TreeSet;
-
+import javax.lang.model.element.Name;
 import javax.tools.JavaFileObject;
 
 public final class SourceText {
   private final Positions positions;
-  private final List<Comment> comments = Lists.newLinkedList();
+  private final List<Comment> comments = new LinkedList<>();
 
   public SourceText(Context context, JCCompilationUnit compilation, Charset sourceEncoding)
       throws IOException {
@@ -59,10 +57,13 @@ public final class SourceText {
     // Filling up the positions identifier lookup table
     SyntaxPreservingScanner scanner = SyntaxPreservingScanner.create(context, text);
     Deque<Token> starts = new ArrayDeque<>();
-    for (Token token = scanner.readToken(); token.kind != TokenKind.EOF;
-         token = scanner.readToken()) {
+    for (Token token = scanner.readToken();
+        token.kind != TokenKind.EOF;
+        token = scanner.readToken()) {
       if (token.kind == TokenKind.IDENTIFIER) {
         positions.addIdentifier(token.name(), scanner.spanForToken(token));
+      } else if (token.kind == TokenKind.NEW) {
+        positions.addIdentifier(Keyword.of("new"), scanner.spanForToken(token));
       } else if (token.kind == TokenKind.LT) {
         starts.addFirst(token);
       } else if (token.kind == TokenKind.GT) {
@@ -82,8 +83,13 @@ public final class SourceText {
     }
   }
 
-  public Positions getPositions() { return positions; }
-  public List<Comment> getComments() { return comments; }
+  public Positions getPositions() {
+    return positions;
+  }
+
+  public List<Comment> getComments() {
+    return comments;
+  }
 
   public static final class Comment {
     public final Span charSpan, lineSpan, byteSpan;
@@ -92,10 +98,65 @@ public final class SourceText {
     private Comment(Positions pos, CommentToken token) {
       text = token.text;
       charSpan = token.span;
-      lineSpan = new Span(pos.charToLine(token.span.getStart()),
-          pos.charToLine(token.span.getEnd()));
-      byteSpan = new Span(pos.charToByteOffset(token.span.getStart()),
-          pos.charToByteOffset(token.span.getEnd()));
+      lineSpan =
+          new Span(pos.charToLine(token.span.getStart()), pos.charToLine(token.span.getEnd()));
+      byteSpan =
+          new Span(
+              pos.charToByteOffset(token.span.getStart()),
+              pos.charToByteOffset(token.span.getEnd()));
+    }
+  }
+
+  /** Names for keywords that must act as anchors. */
+  public static final class Keyword implements Name {
+    private final String keyword;
+
+    /** Factory method that can do something smarter if/when we need it to. */
+    public static Keyword of(String keyword) {
+      return new Keyword(keyword);
+    }
+
+    private Keyword(String keyword) {
+      this.keyword = keyword;
+    }
+
+    @Override
+    public boolean contentEquals(CharSequence cs) {
+      return keyword.equals(cs.toString());
+    }
+
+    @Override
+    public char charAt(int index) {
+      return keyword.charAt(index);
+    }
+
+    @Override
+    public int length() {
+      return keyword.length();
+    }
+
+    @Override
+    public CharSequence subSequence(int start, int end) {
+      return keyword.subSequence(start, end);
+    }
+
+    @Override
+    public String toString() {
+      return keyword;
+    }
+
+    @Override
+    public boolean equals(Object obj) {
+      if (obj instanceof Keyword) {
+        return ((Keyword) obj).contentEquals(keyword);
+      } else {
+        return false;
+      }
+    }
+
+    @Override
+    public int hashCode() {
+      return 1 + keyword.hashCode();
     }
   }
 
@@ -110,8 +171,8 @@ public final class SourceText {
     private final PositionMappings mappings;
     private final Charset encoding;
 
-    private Positions(JavaFileObject sourceFile, EndPosTable endPositions,
-        CharSequence text, Charset encoding) {
+    private Positions(
+        JavaFileObject sourceFile, EndPosTable endPositions, CharSequence text, Charset encoding) {
       this.sourceFile = sourceFile;
       this.endPositions = endPositions;
       this.text = text;
@@ -141,7 +202,7 @@ public final class SourceText {
 
     /**
      * Returns the {@link Span} for the first known occurrence of the specified {@link Name}d
-     * identifier, starting at or after the specified starting offset.  Returns {@code null} if no
+     * identifier, starting at or after the specified starting offset. Returns {@code null} if no
      * occurrences are found.
      */
     public Span findIdentifier(Name name, int startOffset) {
@@ -161,6 +222,11 @@ public final class SourceText {
       int startOffset = charToByteOffset(startCharOffset);
       SortedSet<Span> grps = bracketGroups.tailSet(new Span(startOffset, startOffset));
       return grps.isEmpty() ? null : grps.first();
+    }
+
+    /** Returns the byte span for the given tree in the source text. */
+    public Span getSpan(JCTree tree) {
+      return new Span(getStart(tree), getEnd(tree));
     }
 
     /**
@@ -184,10 +250,11 @@ public final class SourceText {
     private void addIdentifier(Name name, Span position) {
       List<Span> spans = identTable.get(name);
       if (spans == null) {
-        spans = Lists.newArrayList();
+        spans = new ArrayList<>();
         identTable.put(name, spans);
       }
-      spans.add(new Span(charToByteOffset(position.getStart()), charToByteOffset(position.getEnd())));
+      spans.add(
+          new Span(charToByteOffset(position.getStart()), charToByteOffset(position.getEnd())));
     }
 
     // Adds a bracket group for findBracketGroup lookups.
@@ -195,8 +262,13 @@ public final class SourceText {
       bracketGroups.add(bracketGroup);
     }
 
-    int charToLine(int charOffset) { return mappings.charToLine(charOffset); }
-    int charToByteOffset(int charOffset) { return mappings.charToByteOffset(charOffset); }
+    int charToLine(int charOffset) {
+      return mappings.charToLine(charOffset);
+    }
+
+    int charToByteOffset(int charOffset) {
+      return mappings.charToByteOffset(charOffset);
+    }
   }
 
   @VisibleForTesting
@@ -204,14 +276,14 @@ public final class SourceText {
     final int[] byteOffsets, lineNumbers;
 
     public PositionMappings(Charset encoding, CharSequence text) {
-      byteOffsets = new int[text.length()+1];
-      lineNumbers = new int[text.length()+1];
+      byteOffsets = new int[text.length() + 1];
+      lineNumbers = new int[text.length() + 1];
 
       CountingOutputStream counter = new CountingOutputStream();
       OutputStreamWriter writer = new OutputStreamWriter(counter, encoding);
       for (int i = 0; i < text.length(); i++) {
         byteOffsets[i] = counter.getCount();
-        lineNumbers[i] = counter.getLines()+1;
+        lineNumbers[i] = counter.getLines() + 1;
         try {
           writer.append(text.charAt(i));
           writer.flush();
@@ -220,14 +292,15 @@ public final class SourceText {
         }
       }
       byteOffsets[text.length()] = counter.getCount();
-      lineNumbers[text.length()] = counter.getLines()+1;
+      lineNumbers[text.length()] = counter.getLines() + 1;
     }
 
     public int charToLine(int charOffset) {
       if (charOffset < 0) {
         return -1;
       } else if (charOffset > lineNumbers.length) {
-        System.err.printf("WARNING: offset past end of source: %d > %d\n", charOffset, lineNumbers.length);
+        System.err.printf(
+            "WARNING: offset past end of source: %d > %d\n", charOffset, lineNumbers.length);
         return -1;
       }
       return lineNumbers[charOffset];
@@ -237,7 +310,8 @@ public final class SourceText {
       if (charOffset < 0) {
         return -1;
       } else if (charOffset > byteOffsets.length) {
-        System.err.printf("WARNING: offset past end of source: %d > %d\n", charOffset, byteOffsets.length);
+        System.err.printf(
+            "WARNING: offset past end of source: %d > %d\n", charOffset, byteOffsets.length);
         return -1;
       }
       return byteOffsets[charOffset];

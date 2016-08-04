@@ -1,4 +1,4 @@
-load("/tools/build_rules/go", "go_binary", "go_library")
+load("//tools:build_rules/go.bzl", "go_binary", "go_library")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -27,7 +27,7 @@ go_binary(
     srcs = ["parse_test_output.go"],
     deps = [
         ":testsuite",
-        "//third_party/go:benchmark_parse",
+        "@go_x_tools//:benchmark/parse",
     ],
 )
 

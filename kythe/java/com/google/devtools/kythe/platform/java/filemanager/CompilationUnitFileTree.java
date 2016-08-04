@@ -17,15 +17,12 @@
 package com.google.devtools.kythe.platform.java.filemanager;
 
 import com.google.devtools.kythe.proto.Analysis.CompilationUnit;
-
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.HashMap;
 import java.util.Map;
 
-/**
- * Represents the directory structure of the inputs of a compilation unit.
- */
+/** Represents the directory structure of the inputs of a compilation unit. */
 public class CompilationUnitFileTree {
   /**
    * Map from a directory path to file entries in that directory. Each file entry is a pair of file
@@ -44,19 +41,23 @@ public class CompilationUnitFileTree {
       Path curPath = Paths.get(path);
       putDigest(curPath, digest);
 
-      while ((curPath = curPath.getParent()) != null) {
+      while ((curPath = curPath.getParent()) != null && curPath.getFileName() != null) {
         putDigest(curPath, DIRECTORY_DIGEST);
       }
     }
   }
 
+  // Note: Do not call on the absolute root path '/'.
   private void putDigest(Path path, String digest) {
     Path parent = path.getParent();
     String dirname;
     if (parent != null) {
       dirname = parent.toString();
+    } else if (path.isAbsolute()) {
+      // path.getFileName() below will return null on the path '/', leading to an NPE.
+      throw new IllegalArgumentException("The path '/' cannot be used here.");
     } else {
-      dirname = path.isAbsolute() ? "/" : ".";
+      dirname = ".";
     }
     String basename = path.getFileName().toString();
     Map<String, String> dir = dirs.get(dirname);
@@ -94,7 +95,8 @@ public class CompilationUnitFileTree {
    */
   public String lookup(String path) {
     Path p = Paths.get(path);
-    return lookup(p.getParent().toString(), p.getFileName().toString());
+    Path parent = p.getParent();
+    return lookup(parent == null ? null : parent.toString(), p.getFileName().toString());
   }
 
   /**

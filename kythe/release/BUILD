@@ -1,8 +1,9 @@
-load("/tools/build_rules/docker", "docker_build")
+load("//tools:build_rules/docker.bzl", "docker_build")
+
+# See setup_release.sh for instructions on creating a release
 
 docker_build(
     name = "docker",
-    src = "Dockerfile",
     data = [
         "kythe.sh",
         "maven_extractor.sh",
@@ -16,12 +17,10 @@ docker_build(
     image_name = "google/kythe",
     tags = ["manual"],
     use_cache = True,
-    deps = [
-        "//kythe/release/base",
-    ],
+    deps = ["//kythe/release/base"],
 )
 
-release_version = "v0.0.12"
+release_version = "v0.0.23"
 
 genrule(
     name = "release",
@@ -81,9 +80,11 @@ sh_test(
     srcs = ["release_test.sh"],
     data = [
         ":release",
+        "//external:guava",
+        "//external:jq",
+        "//kythe/java/com/google/devtools/kythe/common:FormattingLogger.java",
         "//kythe/testdata:entries",
         "//kythe/testdata:test.kindex",
-        "//third_party/jq",
     ],
     tags = [
         "local",

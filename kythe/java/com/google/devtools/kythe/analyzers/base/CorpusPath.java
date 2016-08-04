@@ -21,6 +21,7 @@ import com.google.devtools.kythe.proto.Storage.VName;
 /** Path within a particular corpus and corpus root. */
 public final class CorpusPath {
   private final String corpus, root, path;
+
   public CorpusPath(String corpus, String root, String path) {
     this.corpus = corpus;
     this.root = root;
@@ -28,17 +29,22 @@ public final class CorpusPath {
   }
 
   /**
-   * Returns a new {@link CorpusPath} equivalent to the corpus/path/root subset of the given
-   * {@link VName}.
+   * Returns a new {@link CorpusPath} equivalent to the corpus/path/root subset of the given {@link
+   * VName}.
    */
   public static CorpusPath fromVName(VName vname) {
-    return new CorpusPath(
-        vname.getCorpus(),
-        vname.getRoot(),
-        vname.getPath());
+    return new CorpusPath(vname.getCorpus(), vname.getRoot(), vname.getPath());
   }
 
-  public String getCorpus() { return corpus; }
-  public String getRoot() { return root; }
-  public String getPath() { return path; }
+  public String getCorpus() {
+    return corpus;
+  }
+
+  public String getRoot() {
+    return root;
+  }
+
+  public String getPath() {
+    return path;
+  }
 }

@@ -30,8 +30,8 @@
 //   # List Kythe's kythe/cxx/common directory (as URIs)
 //   kythe --api /path/to/table ls --uris kythe://kythe?path=kythe/cxx/common
 //
-//   # Display all file anchors references for kythe/cxx/common/CommandLineUtils.cc
-//   kythe --api /path/to/table refs kythe://kythe?lang=c%2B%2B?path=kythe/cxx/common/CommandLineUtils.cc
+//   # Display all file anchor decorations for kythe/cxx/common/CommandLineUtils.cc
+//   kythe --api /path/to/table decor kythe://kythe?lang=c%2B%2B?path=kythe/cxx/common/CommandLineUtils.cc
 //
 //   # Show all outward edges for a particular node
 //   kythe --api /path/to/table edges kythe:?lang=java#java.util.List
@@ -41,9 +41,6 @@
 //
 //   # Show all facts (except /kythe/text) for a node
 //   kythe --api /path/to/table node kythe:?lang=c%2B%2B#StripPrefix%3Acommon%3Akythe%23n%23D%40kythe%2Fcxx%2Fcommon%2FCommandLineUtils.cc%3A167%3A1
-//
-//   # Search for all Java class nodes with the given VName path
-//   kythe --api /path/to/table search --lang java --path kythe/java/com/google/devtools/kythe/analyzers/base/EntrySet.java /kythe/node/kind record /kythe/subkind class
 package main
 
 import (
@@ -55,6 +52,7 @@ import (
 	"sort"
 
 	"kythe.io/kythe/go/serving/api"
+	"kythe.io/kythe/go/util/build"
 )
 
 var (
@@ -66,11 +64,12 @@ var (
 func globalUsage() {
 	fmt.Fprintf(os.Stderr, `Usage: %s <global-flags> <command> <flags>
 
+%s
+
 Examples:
   %[1]s ls --uris kythe://kythe?path=kythe/cxx/common
-  %[1]s search --path kythe/cxx/common/CommandLineUtils.h /kythe/node/kind file
   %[1]s node kythe:?lang=java#java.util.List
-`, filepath.Base(os.Args[0]))
+`, filepath.Base(os.Args[0]), build.VersionLine())
 	if !shortHelp {
 		fmt.Fprintln(os.Stderr, "\nGlobal Flags:")
 		flag.PrintDefaults()
@@ -91,10 +90,18 @@ var cmds = map[string]command{
 	"edges":  cmdEdges,
 	"ls":     cmdLS,
 	"node":   cmdNode,
-	"refs":   cmdRefs,
+	"decor":  cmdDecor,
 	"source": cmdSource,
-	"search": cmdSearch,
 	"xrefs":  cmdXRefs,
+	"docs":   cmdDocs,
+}
+
+var cmdSynonymns = map[string]string{
+	"edge":             "edges",
+	"nodes":            "node",
+	"decorations":      "decor",
+	"refs":             "decor", // for backwards-compatibility
+	"cross-references": "xrefs",
 }
 
 func init() {
@@ -121,7 +128,7 @@ func main() {
 	}
 
 	defer (*apiFlag).Close()
-	xs, ft, idx = *apiFlag, *apiFlag, *apiFlag
+	xs, ft = *apiFlag, *apiFlag
 
 	if err := getCommand(flag.Arg(0)).run(); err != nil {
 		log.Fatal("ERROR: ", err)
@@ -130,6 +137,12 @@ func main() {
 
 func getCommand(name string) command {
 	c, ok := cmds[name]
+	if !ok {
+		synonymn, found := cmdSynonymns[name]
+		if found {
+			c, ok = cmds[synonymn]
+		}
+	}
 	if !ok {
 		fmt.Fprintf(os.Stderr, "ERROR: unknown command %q\n", name)
 		globalUsage()

@@ -17,41 +17,38 @@
 package com.google.devtools.kythe.platform.shared;
 
 import com.google.common.net.HostAndPort;
+import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.SettableFuture;
 import com.google.devtools.kythe.proto.Analysis.FileData;
-import com.google.devtools.kythe.proto.Analysis.FileInfo;
+import com.google.devtools.kythe.proto.Analysis.FilesRequest;
 import com.google.devtools.kythe.proto.FileDataServiceGrpc;
 import com.google.devtools.kythe.proto.FileDataServiceGrpc.FileDataServiceStub;
-
-import io.grpc.ChannelImpl;
+import io.grpc.ManagedChannel;
 import io.grpc.netty.NegotiationType;
 import io.grpc.netty.NettyChannelBuilder;
 import io.grpc.stub.StreamObserver;
-
 import java.net.InetSocketAddress;
-import java.util.concurrent.Future;
 
-/** {@link FileDataProvider} backed by an external {@link FileDataServiceGrpc.FileDataService}. */
+/** {@link FileDataProvider} backed by an external {@link FileDataServiceGrpc} service. */
 public class RemoteFileData implements FileDataProvider {
   private final FileDataServiceStub stub;
 
   public RemoteFileData(String addr) {
     HostAndPort hp = HostAndPort.fromString(addr);
-    ChannelImpl channel = NettyChannelBuilder
-        .forAddress(new InetSocketAddress(hp.getHostText(), hp.getPort()))
-        .negotiationType(NegotiationType.PLAINTEXT)
-        .build();
+    ManagedChannel channel =
+        NettyChannelBuilder.forAddress(new InetSocketAddress(hp.getHostText(), hp.getPort()))
+            .negotiationType(NegotiationType.PLAINTEXT)
+            .build();
     stub = FileDataServiceGrpc.newStub(channel);
   }
 
   @Override
-  public Future<byte[]> startLookup(String path, String digest) {
+  public ListenableFuture<byte[]> startLookup(String path, String digest) {
     SettableFuture<byte[]> future = SettableFuture.create();
-    stub.get(new SingletonLookup(future))
-        .onValue(FileInfo.newBuilder()
-            .setPath(path)
-            .setDigest(digest)
-            .build());
+
+    FilesRequest.Builder req = FilesRequest.newBuilder();
+    req.addFilesBuilder().setPath(path).setDigest(digest);
+    stub.get(req.build(), new SingletonLookup(future));
     return future;
   }
 
@@ -66,7 +63,10 @@ public class RemoteFileData implements FileDataProvider {
     }
 
     @Override
-    public void onValue(FileData data) {
+    public void onNext(FileData data) {
+      if (data.getMissing()) {
+        throw new IllegalStateException("no FileData returned");
+      }
       future.set(data.getContent().toByteArray());
     }
 

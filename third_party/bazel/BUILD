@@ -1,4 +1,4 @@
-load("/tools/build_rules/proto", "proto_library")
+load("//tools:build_rules/proto.bzl", "proto_library")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -15,12 +15,11 @@ proto_library(
     gen_cc = 1,
     gen_go = 1,
     gen_java = 1,
-    go_package = "third_party/bazel/extra_actions_base_proto",
+    gofast = 0,  # protoc-gen-gofast fails due the extensions in this proto
 )
 
 proto_library(
     name = "test_status_proto",
     src = "src/main/protobuf/test_status.proto",
     gen_go = 1,
-    go_package = "third_party/bazel/test_status_proto",
 )

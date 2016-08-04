@@ -21,15 +21,13 @@ import com.google.common.base.Strings;
 import com.google.devtools.kythe.platform.shared.AnalysisException;
 import com.google.devtools.kythe.platform.shared.StatisticsCollector;
 import com.google.devtools.kythe.proto.Analysis.CompilationUnit;
-
 import com.sun.source.tree.CompilationUnitTree;
-
 import java.io.Serializable;
 import java.net.URI;
 
 /**
- * Recreates a javac compiler instance from a CompilationUnit and allows
- * derived classes to analyze the instance and report results.
+ * Recreates a javac compiler instance from a CompilationUnit and allows derived classes to analyze
+ * the instance and report results.
  */
 public abstract class JavacAnalyzer implements Serializable {
   private static final long serialVersionUID = 8805455287690923133L;

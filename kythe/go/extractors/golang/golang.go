@@ -279,10 +279,11 @@ func (p *Package) Extract() error {
 	p.addFiles(cu, bp.Root, srcBase, bp.CXXFiles)
 	p.addFiles(cu, bp.Root, srcBase, bp.HFiles)
 	p.addSource(cu, bp.Root, srcBase, bp.TestGoFiles)
-	p.addSource(cu, bp.Root, srcBase, bp.XTestGoFiles)
 
-	// TODO(fromberger): Should we treat tests as separate compilations?  Go
-	// considers them part of the same package.
+	// TODO(fromberger): Treat tests that are not in the same package as a
+	// separate compilation, e.g.,
+	// p.addSource(cu, bp.Root, srcBase, bp.XTestGoFiles)
+	// missing = append(missing, p.addDeps(cu, bp.XTestImports)...)
 
 	// Add the outputs of all the dependencies as required inputs.
 	//
@@ -290,7 +291,6 @@ func (p *Package) Extract() error {
 	// the source requirements for tools like the oracle.
 	missing := p.addDeps(cu, bp.Imports)
 	missing = append(missing, p.addDeps(cu, bp.TestImports)...)
-	missing = append(missing, p.addDeps(cu, bp.XTestImports)...)
 
 	// Add command-line arguments.
 	// TODO(fromberger): Figure out what to do with cgo compiler flags.
@@ -387,8 +387,6 @@ func (p *Package) addInput(cu *apb.CompilationUnit, bp *build.Package) {
 	// Populate the vname for the input based on the corpus of the package.
 	fi := cu.RequiredInput[len(cu.RequiredInput)-1]
 	fi.VName = p.ext.vnameFor(bp)
-	fi.VName.Path = fi.Info.Path
-	fi.VName.Signature = "" // updated in the fetcher
 }
 
 // addEnv adds an environment variable to cu.

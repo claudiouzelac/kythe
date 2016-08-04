@@ -1,6 +1,6 @@
 licenses(["notice"])
 
-load("/tools/build_rules/cc_resources", "cc_resources")
+load("//tools:build_rules/cc_resources.bzl", "cc_resources")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -11,7 +11,11 @@ filegroup(
 
 filegroup(
     name = "git",
-    srcs = glob(["llvm/**/.git/**"]),
+    srcs = glob([
+        "llvm/tools/clang/tools/extra/.git/**",
+        "llvm/tools/clang/.git/**",
+        "llvm/.git/**",
+    ]),
 )
 
 cc_library(
@@ -39,6 +43,20 @@ cc_library(
         "llvm/build/Release+Asserts/lib/libclangLex.a",
         "llvm/build/Release+Asserts/lib/libclangBasic.a",
         "llvm/build/Release+Asserts/lib/libclangAnalysis.a",
+        "llvm/build/Release+Asserts/lib/libLLVMAMDGPUInfo.a",
+        "llvm/build/Release+Asserts/lib/libLLVMBPFInfo.a",
+        "llvm/build/Release+Asserts/lib/libLLVMHexagonInfo.a",
+        "llvm/build/Release+Asserts/lib/libLLVMSystemZInfo.a",
+        "llvm/build/Release+Asserts/lib/libLLVMNVPTXInfo.a",
+        "llvm/build/Release+Asserts/lib/libLLVMCppBackendInfo.a",
+        "llvm/build/Release+Asserts/lib/libLLVMMSP430Info.a",
+        "llvm/build/Release+Asserts/lib/libLLVMXCoreInfo.a",
+        "llvm/build/Release+Asserts/lib/libLLVMMipsInfo.a",
+        "llvm/build/Release+Asserts/lib/libLLVMAArch64Info.a",
+        "llvm/build/Release+Asserts/lib/libLLVMARMInfo.a",
+        "llvm/build/Release+Asserts/lib/libLLVMPowerPCInfo.a",
+        "llvm/build/Release+Asserts/lib/libLLVMSparcInfo.a",
+        "llvm/build/Release+Asserts/lib/libLLVMX86Info.a",
         "llvm/build/Release+Asserts/lib/libLLVMAnalysis.a",
         "llvm/build/Release+Asserts/lib/libLLVMOption.a",
         "llvm/build/Release+Asserts/lib/libLLVMTransformUtils.a",
@@ -50,6 +68,12 @@ cc_library(
         # See https://github.com/google/bazel/issues/61
         "//tools/modules:check_modules",
     ],
+    hdrs = glob([
+        "llvm/include/**",
+        "llvm/build/include/**",
+        "llvm/build/tools/clang/include/**",
+        "llvm/tools/clang/include/**",
+    ]),
     defines = [
         "__STDC_LIMIT_MACROS",
         "__STDC_CONSTANT_MACROS",

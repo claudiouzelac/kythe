@@ -15,187 +15,220 @@
  */
 
 // Package pipeline implements an in-process pipeline to create a combined
-// filetree and xrefs serving table from a graphstore Service.
+// filetree and xrefs serving table from a stream of GraphStore-ordered entries.
 package pipeline
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
-	"io"
-	"io/ioutil"
 	"log"
-	"os"
 	"sort"
-	"strings"
 	"sync"
 
 	"kythe.io/kythe/go/services/filetree"
 	"kythe.io/kythe/go/services/graphstore"
-	"kythe.io/kythe/go/services/graphstore/compare"
+	"kythe.io/kythe/go/services/xrefs"
 	ftsrv "kythe.io/kythe/go/serving/filetree"
-	"kythe.io/kythe/go/serving/search"
-	"kythe.io/kythe/go/serving/xrefs"
+	xsrv "kythe.io/kythe/go/serving/xrefs"
 	"kythe.io/kythe/go/serving/xrefs/assemble"
 	"kythe.io/kythe/go/storage/keyvalue"
-	"kythe.io/kythe/go/storage/leveldb"
+	"kythe.io/kythe/go/storage/stream"
 	"kythe.io/kythe/go/storage/table"
-	"kythe.io/kythe/go/util/kytheuri"
+	"kythe.io/kythe/go/util/disksort"
 	"kythe.io/kythe/go/util/schema"
-	"kythe.io/kythe/go/util/stringset"
+	"kythe.io/kythe/go/util/sortutil"
 
 	"github.com/golang/protobuf/proto"
 	"golang.org/x/net/context"
 
 	ftpb "kythe.io/kythe/proto/filetree_proto"
+	ipb "kythe.io/kythe/proto/internal_proto"
 	srvpb "kythe.io/kythe/proto/serving_proto"
 	spb "kythe.io/kythe/proto/storage_proto"
 )
 
 // Options controls the behavior of pipeline.Run.
 type Options struct {
-	// MaxEdgePageSize is maximum number of edges that are allowed in the
-	// PagedEdgeSet and any EdgePage.  If MaxEdgePageSize <= 0, no paging is
-	// attempted.
-	MaxEdgePageSize int
+	// Verbose determines whether to emit extra, and possibly excessive, log messages.
+	Verbose bool
+
+	// MaxPageSize is maximum number of edges/cross-references that are allowed in
+	// PagedEdgeSets, CrossReferences, EdgePages, and CrossReferences_Pages.  If
+	// MaxPageSize <= 0, no paging is attempted.
+	MaxPageSize int
+
+	// CompressShards determines whether intermediate data written to disk should
+	// be compressed.
+	CompressShards bool
+
+	// MaxShardSize is the maximum number of elements to keep in-memory before
+	// flushing an intermediary data shard to disk.
+	MaxShardSize int
+
+	// IOBufferSize is the size of the reading/writing buffers for the temporary
+	// file shards.
+	IOBufferSize int
+}
+
+func (o *Options) diskSorter(l sortutil.Lesser, m disksort.Marshaler) (disksort.Interface, error) {
+	return disksort.NewMergeSorter(disksort.MergeOptions{
+		Lesser:         l,
+		Marshaler:      m,
+		MaxInMemory:    o.MaxShardSize,
+		CompressShards: o.CompressShards,
+		IOBufferSize:   o.IOBufferSize,
+	})
 }
 
 const chBuf = 512
 
+type servingOutput struct {
+	xs  table.Proto
+	idx table.Inverted
+}
+
 // Run writes the xrefs and filetree serving tables to db based on the given
-// graphstore.Service.
-func Run(ctx context.Context, gs graphstore.Service, db keyvalue.DB, opts *Options) error {
+// entries (in GraphStore-order).
+func Run(ctx context.Context, rd stream.EntryReader, db keyvalue.DB, opts *Options) error {
 	if opts == nil {
 		opts = new(Options)
 	}
 
 	log.Println("Starting serving pipeline")
-	tbl := table.ProtoBatchParallel{&table.KVProto{db}}
 
-	entries := make(chan *spb.Entry, chBuf)
+	out := &servingOutput{
+		xs:  table.ProtoBatchParallel{&table.KVProto{DB: db}},
+		idx: &table.KVInverted{DB: db},
+	}
+	rd = filterReverses(rd)
 
-	ftIn := make(chan *spb.VName, chBuf)
-	nIn, eIn, dIn := make(chan *spb.Entry, chBuf), make(chan *spb.Entry, chBuf), make(chan *spb.Entry, chBuf)
-
+	var cErr error
+	var wg sync.WaitGroup
+	var sortedEdges disksort.Interface
+	wg.Add(1)
 	go func() {
-		for entry := range entries {
-			if graphstore.IsNodeFact(entry) {
-				nIn <- entry
-				if entry.FactName == schema.NodeKindFact && string(entry.FactValue) == "file" {
-					ftIn <- entry.Source
-				}
-			} else {
-				eIn <- entry
-			}
-			dIn <- entry
+		sortedEdges, cErr = combineNodesAndEdges(ctx, opts, out, rd)
+		if cErr != nil {
+			cErr = fmt.Errorf("error combining nodes and edges: %v", cErr)
 		}
-		close(ftIn)
-		close(nIn)
-		close(eIn)
-		close(dIn)
-	}()
-	log.Println("Scanning GraphStore")
-	var sErr error
-	go func() {
-		sErr = gs.Scan(ctx, &spb.ScanRequest{}, func(e *spb.Entry) error {
-			entries <- e
-			return nil
-		})
-		if sErr != nil {
-			sErr = fmt.Errorf("error scanning GraphStore: %v", sErr)
-		}
-		close(entries)
+		wg.Done()
 	}()
 
-	var (
-		ftErr, nErr, eErr, dErr error
-		ftWG, xrefsWG           sync.WaitGroup
-	)
-	ftWG.Add(1)
-	go func() {
-		defer ftWG.Done()
-		ftErr = writeFileTree(ctx, tbl, ftIn)
-		if ftErr != nil {
-			ftErr = fmt.Errorf("error writing FileTree: %v", ftErr)
-		} else {
-			log.Println("Wrote FileTree")
-		}
-	}()
-	xrefsWG.Add(3)
-	nodes := make(chan *srvpb.Node)
-	go func() {
-		defer xrefsWG.Done()
-		nErr = writeNodes(ctx, tbl, nIn, nodes)
-		if nErr != nil {
-			nErr = fmt.Errorf("error writing Nodes: %v", nErr)
-		} else {
-			log.Println("Wrote Nodes")
-		}
-	}()
-	go func() {
-		defer xrefsWG.Done()
-		eErr = writeEdges(ctx, tbl, eIn, opts.MaxEdgePageSize)
-		if eErr != nil {
-			eErr = fmt.Errorf("error writing Edges: %v", eErr)
-		} else {
-			log.Println("Wrote Edges")
-		}
-	}()
-	go func() {
-		defer xrefsWG.Done()
-		dErr = writeDecorations(ctx, tbl, dIn)
-		if dErr != nil {
-			dErr = fmt.Errorf("error writing FileDecorations: %v", dErr)
-		} else {
-			log.Println("Wrote Decorations")
-		}
-	}()
-
-	var (
-		idxWG  sync.WaitGroup
-		idxErr error
-	)
-	idxWG.Add(1)
-	go func() {
-		defer idxWG.Done()
-		idxErr = writeIndex(ctx, &table.KVInverted{db}, nodes)
-		if idxErr != nil {
-			idxErr = fmt.Errorf("error writing Search Index: %v", idxErr)
-		} else {
-			log.Println("Wrote Search Index")
-		}
-	}()
-
-	xrefsWG.Wait()
-	if eErr != nil {
-		return eErr
-	} else if nErr != nil {
-		return nErr
-	} else if dErr != nil {
-		return dErr
+	wg.Wait()
+	if cErr != nil {
+		return cErr
 	}
 
-	ftWG.Wait()
-	if ftErr != nil {
-		return ftErr
-	}
-	idxWG.Wait()
-	if idxErr != nil {
-		return idxErr
+	pesIn, dIn := make(chan *srvpb.Edge, chBuf), make(chan *srvpb.Edge, chBuf)
+	var pErr, fErr error
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		if err := writePagedEdges(ctx, pesIn, out.xs, opts); err != nil {
+			pErr = fmt.Errorf("error writing paged edge sets: %v", err)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		if err := writeDecorAndRefs(ctx, opts, dIn, out); err != nil {
+			fErr = fmt.Errorf("error writing file decorations: %v", err)
+		}
+	}()
+
+	err := sortedEdges.Read(func(x interface{}) error {
+		e := x.(*srvpb.Edge)
+		pesIn <- e
+		dIn <- e
+		return nil
+	})
+	close(pesIn)
+	close(dIn)
+	if err != nil {
+		return fmt.Errorf("error reading edges table: %v", err)
 	}
 
-	return sErr
+	wg.Wait()
+	if pErr != nil {
+		return pErr
+	}
+	return fErr
 }
 
-func writeFileTree(ctx context.Context, t table.Proto, files <-chan *spb.VName) error {
+func combineNodesAndEdges(ctx context.Context, opts *Options, out *servingOutput, rdIn stream.EntryReader) (disksort.Interface, error) {
+	log.Println("Writing partial edges")
+
 	tree := filetree.NewMap()
-	for f := range files {
-		tree.AddFile(f)
-		// TODO(schroederc): evict finished directories (based on GraphStore order)
+	rd := func(f func(*spb.Entry) error) error {
+		return rdIn(func(e *spb.Entry) error {
+			if e.FactName == schema.NodeKindFact && string(e.FactValue) == schema.FileKind {
+				tree.AddFile(e.Source)
+				// TODO(schroederc): evict finished directories (based on GraphStore order)
+			}
+			return f(e)
+		})
 	}
 
+	partialSorter, err := opts.diskSorter(edgeLesser{}, edgeMarshaler{})
+	if err != nil {
+		return nil, err
+	}
+
+	bIdx := out.idx.Buffered()
+	if err := assemble.Sources(rd, func(src *ipb.Source) error {
+		return writePartialEdges(ctx, partialSorter, bIdx, src)
+	}); err != nil {
+		return nil, err
+	}
+	if err := bIdx.Flush(ctx); err != nil {
+		return nil, err
+	}
+
+	if err := writeFileTree(ctx, tree, out.xs); err != nil {
+		return nil, fmt.Errorf("error writing file tree: %v", err)
+	}
+	tree = nil
+
+	log.Println("Writing complete edges")
+
+	cSorter, err := opts.diskSorter(edgeLesser{}, edgeMarshaler{})
+	if err != nil {
+		return nil, err
+	}
+
+	var n *srvpb.Node
+	if err := partialSorter.Read(func(i interface{}) error {
+		e := i.(*srvpb.Edge)
+		if n == nil || n.Ticket != e.Source.Ticket {
+			n = e.Source
+			if e.Target != nil {
+				if opts.Verbose {
+					log.Printf("WARNING: missing node facts for: %q", e.Source.Ticket)
+				}
+			}
+		}
+		if e.Target == nil {
+			// pass-through self-edges
+			return cSorter.Add(e)
+		}
+		e.Source = n
+		if err := writeCompletedEdges(ctx, cSorter, e); err != nil {
+			return fmt.Errorf("error writing complete edge: %v", err)
+		}
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("error reading/writing edges: %v", err)
+	}
+
+	return cSorter, nil
+}
+
+func writeFileTree(ctx context.Context, tree *filetree.Map, out table.Proto) error {
+	buffer := out.Buffered()
 	for corpus, roots := range tree.M {
 		for root, dirs := range roots {
 			for path, dir := range dirs {
-				if err := t.Put(ctx, ftsrv.DirKey(corpus, root, path), dir); err != nil {
+				if err := buffer.Put(ctx, ftsrv.PrefixedDirKey(corpus, root, path), dir); err != nil {
 					return err
 				}
 			}
@@ -205,305 +238,373 @@ func writeFileTree(ctx context.Context, t table.Proto, files <-chan *spb.VName) 
 	if err != nil {
 		return err
 	}
-	return t.Put(ctx, ftsrv.CorpusRootsKey, cr)
+	if err := buffer.Put(ctx, ftsrv.CorpusRootsPrefixedKey, cr); err != nil {
+		return err
+	}
+	return buffer.Flush(ctx)
 }
 
-func writeNodes(ctx context.Context, t table.Proto, nodeEntries <-chan *spb.Entry, nodes chan<- *srvpb.Node) error {
-	defer close(nodes)
-	defer drainEntries(nodeEntries) // ensure channel is drained on errors
-	for node := range collectNodes(nodeEntries) {
-		nodes <- node
-		if err := t.Put(ctx, xrefs.NodeKey(node.Ticket), node); err != nil {
+func filterReverses(rd stream.EntryReader) stream.EntryReader {
+	return func(f func(*spb.Entry) error) error {
+		return rd(func(e *spb.Entry) error {
+			if graphstore.IsNodeFact(e) || schema.EdgeDirection(e.EdgeKind) == schema.Forward {
+				return f(e)
+			}
+			return nil
+		})
+	}
+}
+
+func writePartialEdges(ctx context.Context, sorter disksort.Interface, idx table.BufferedInverted, src *ipb.Source) error {
+	edges := assemble.PartialReverseEdges(src)
+	for _, pe := range edges {
+		if err := sorter.Add(pe); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func collectNodes(nodeEntries <-chan *spb.Entry) <-chan *srvpb.Node {
-	nodes := make(chan *srvpb.Node)
-	go func() {
-		var (
-			node  *srvpb.Node
-			vname *spb.VName
-		)
-		for e := range nodeEntries {
-			if node != nil && !compare.VNamesEqual(e.Source, vname) {
-				nodes <- node
-				node = nil
-				vname = nil
-			}
-			if node == nil {
-				vname = e.Source
-				ticket := kytheuri.ToString(vname)
-				node = &srvpb.Node{Ticket: ticket}
-			}
-			node.Fact = append(node.Fact, assemble.NodeFact(e))
-		}
-		if node != nil {
-			nodes <- node
-		}
-		close(nodes)
-	}()
-	return nodes
+func writeCompletedEdges(ctx context.Context, edges disksort.Interface, e *srvpb.Edge) error {
+	if err := edges.Add(&srvpb.Edge{
+		Source:  &srvpb.Node{Ticket: e.Source.Ticket},
+		Kind:    e.Kind,
+		Ordinal: e.Ordinal,
+		Target:  e.Target,
+	}); err != nil {
+		return fmt.Errorf("error writing complete edge: %v", err)
+	}
+	if err := edges.Add(&srvpb.Edge{
+		Source:  &srvpb.Node{Ticket: e.Target.Ticket},
+		Kind:    schema.MirrorEdge(e.Kind),
+		Ordinal: e.Ordinal,
+		Target:  assemble.FilterTextFacts(e.Source),
+	}); err != nil {
+		return fmt.Errorf("error writing complete edge mirror: %v", err)
+	}
+	return nil
 }
 
-type deleteOnClose struct {
-	keyvalue.DB
-	path string
-}
-
-// Close implements part of the keyvalue.DB interface.
-func (d *deleteOnClose) Close() error {
-	err := d.DB.Close()
-	log.Println("Removing temporary table", d.path)
-	if err := os.RemoveAll(d.path); err != nil {
-		log.Printf("Failed to remove temporary directory %q: %v", d.path, err)
-	}
-	return err
-}
-
-func tempTable(name string) (keyvalue.DB, error) {
-	tempDir, err := ioutil.TempDir("", "kythe.pipeline."+name)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create temporary directory: %v", err)
-	}
-	tbl, err := leveldb.Open(tempDir, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create temporary table: %v", err)
-	}
-	return &deleteOnClose{tbl, tempDir}, nil
-}
-
-func writeEdges(ctx context.Context, t table.Proto, edges <-chan *spb.Entry, maxEdgePageSize int) error {
-	defer drainEntries(edges) // ensure channel is drained on errors
-
-	temp, err := tempTable("edge.groups")
-	if err != nil {
-		return fmt.Errorf("failed to create temporary table: %v", err)
-	}
-	edgeGroups := &table.KVProto{temp}
-	defer func() {
-		if err := edgeGroups.Close(ctx); err != nil {
-			log.Println("Error closing edge groups table: %v", err)
-		}
-	}()
-
-	log.Println("Writing temporary edges table")
-
-	var (
-		src     *spb.VName
-		kind    string
-		targets stringset.Set
-	)
-	for e := range edges {
-		if src != nil && (!compare.VNamesEqual(e.Source, src) || kind != e.EdgeKind) {
-			if err := writeWithReverses(ctx, edgeGroups, kytheuri.ToString(src), kind, targets.Slice()); err != nil {
-				return err
-			}
-			src = nil
-		}
-		if src == nil {
-			src = e.Source
-			kind = e.EdgeKind
-			targets = stringset.New()
-		}
-		targets.Add(kytheuri.ToString(e.Target))
-	}
-	if src != nil {
-		if err := writeWithReverses(ctx, edgeGroups, kytheuri.ToString(src), kind, targets.Slice()); err != nil {
-			return err
-		}
-	}
-
-	return writeEdgePages(ctx, t, edgeGroups, maxEdgePageSize)
-}
-
-func writeEdgePages(ctx context.Context, t table.Proto, edgeGroups *table.KVProto, maxEdgePageSize int) error {
-	// TODO(schroederc): spill large PagedEdgeSets into EdgePages
-
-	it, err := edgeGroups.ScanPrefix(nil, &keyvalue.Options{LargeRead: true})
-	if err != nil {
-		return err
-	}
-	defer it.Close()
-
+func writePagedEdges(ctx context.Context, edges <-chan *srvpb.Edge, out table.Proto, opts *Options) error {
+	buffer := out.Buffered()
 	log.Println("Writing EdgeSets")
 	esb := &assemble.EdgeSetBuilder{
-		MaxEdgePageSize: maxEdgePageSize,
+		MaxEdgePageSize: opts.MaxPageSize,
 		Output: func(ctx context.Context, pes *srvpb.PagedEdgeSet) error {
-			return t.Put(ctx, xrefs.EdgeSetKey(pes.EdgeSet.SourceTicket), pes)
+			return buffer.Put(ctx, xsrv.EdgeSetKey(pes.Source.Ticket), pes)
 		},
 		OutputPage: func(ctx context.Context, ep *srvpb.EdgePage) error {
-			return t.Put(ctx, xrefs.EdgePageKey(ep.PageKey), ep)
+			return buffer.Put(ctx, xsrv.EdgePageKey(ep.PageKey), ep)
 		},
 	}
-	for {
-		k, v, err := it.Next()
-		if err == io.EOF {
-			break
-		} else if err != nil {
-			return fmt.Errorf("error scanning edge groups table: %v", err)
+
+	var grp *srvpb.EdgeGroup
+	for e := range edges {
+		if grp != nil && (e.Target == nil || grp.Kind != e.Kind) {
+			if err := esb.AddGroup(ctx, grp); err != nil {
+				for range edges {
+				} // drain input channel
+				return err
+			}
+			grp = nil
 		}
 
-		ss := strings.Split(string(k), tempTableKeySep)
-		if len(ss) != 3 {
-			return fmt.Errorf("invalid edge groups table key: %q", string(k))
+		if e.Target == nil {
+			// Head-only edge: signals a new set of edges with the same Source
+			if err := esb.StartEdgeSet(ctx, e.Source); err != nil {
+				return err
+			}
+		} else if grp == nil {
+			grp = &srvpb.EdgeGroup{
+				Kind: e.Kind,
+				Edge: []*srvpb.EdgeGroup_Edge{e2e(e)},
+			}
+		} else {
+			grp.Edge = append(grp.Edge, e2e(e))
 		}
-		src := ss[0]
+	}
 
-		var eg srvpb.EdgeSet_Group
-		if err := proto.Unmarshal(v, &eg); err != nil {
-			return fmt.Errorf("invalid edge groups table value: %v", err)
-		}
-
-		if err := esb.AddGroup(ctx, src, &eg); err != nil {
+	if grp != nil {
+		if err := esb.AddGroup(ctx, grp); err != nil {
 			return err
 		}
 	}
-	return esb.Flush(ctx)
+
+	if err := esb.Flush(ctx); err != nil {
+		return err
+	}
+	return buffer.Flush(ctx)
 }
 
-func writeWithReverses(ctx context.Context, tbl *table.KVProto, src, kind string, targets []string) error {
-	if err := tbl.Put(ctx, []byte(src+tempTableKeySep+kind+tempTableKeySep), &srvpb.EdgeSet_Group{
-		Kind:         kind,
-		TargetTicket: targets,
-	}); err != nil {
-		return fmt.Errorf("error writing edges group: %v", err)
+func e2e(e *srvpb.Edge) *srvpb.EdgeGroup_Edge {
+	return &srvpb.EdgeGroup_Edge{
+		Target:  e.Target,
+		Ordinal: e.Ordinal,
 	}
-	revGroup := &srvpb.EdgeSet_Group{
-		Kind:         schema.MirrorEdge(kind),
-		TargetTicket: []string{src},
-	}
-	for _, tgt := range targets {
-		if err := tbl.Put(ctx, []byte(tgt+tempTableKeySep+revGroup.Kind+tempTableKeySep+src), revGroup); err != nil {
-			return fmt.Errorf("error writing rev edges group: %v", err)
-		}
-	}
-	return nil
 }
 
-var revChildOfEdgeKind = schema.MirrorEdge(schema.ChildOfEdge)
-
-const tempTableKeySep = "\000"
-
-func createFragmentsTable(ctx context.Context, entries <-chan *spb.Entry) (t *table.KVProto, err error) {
-	log.Println("Writing decoration fragments")
-
-	defer drainEntries(entries) // ensure channel is drained on errors
-
-	temp, err := tempTable("decor.fragments")
-	if err != nil {
-		return nil, fmt.Errorf("failed to create temporary table: %v", err)
-	}
-	fragments := &table.KVProto{temp}
-	defer func() {
-		if err != nil {
-			if err := fragments.Close(ctx); err != nil {
-				log.Println("Error closing fragments table: %v", err)
-			}
-		}
-	}()
-
-	for src := range assemble.Sources(entries) {
-		for _, fragment := range assemble.DecorationFragments(src) {
-			fileTicket := fragment.FileTicket
-			var anchorTicket string
-			if len(fragment.Decoration) != 0 {
-				// don't keep decor.FileTicket for anchors; we aren't sure we have a file yet
-				fragment.FileTicket = ""
-				anchorTicket = fragment.Decoration[0].Anchor.Ticket
-			}
-			if err := fragments.Put(ctx, []byte(fileTicket+tempTableKeySep+anchorTicket), fragment); err != nil {
-				return nil, err
-			}
-		}
-	}
-	return fragments, nil
+// TODO(schroederc): use ipb.CrossReference for fragments
+type decorationFragment struct {
+	fileTicket string
+	decoration *srvpb.FileDecorations
 }
 
-func writeDecorations(ctx context.Context, t table.Proto, entries <-chan *spb.Entry) error {
-	fragments, err := createFragmentsTable(ctx, entries)
-	if err != nil {
-		return fmt.Errorf("error creating fragments table: %v", err)
-	}
-	defer fragments.Close(ctx)
+type fragmentLesser struct{}
 
-	it, err := fragments.ScanPrefix(nil, &keyvalue.Options{LargeRead: true})
+func (fragmentLesser) Less(a, b interface{}) bool {
+	x, y := a.(*decorationFragment), b.(*decorationFragment)
+	if x.fileTicket == y.fileTicket {
+		if len(x.decoration.Decoration) == 0 || len(y.decoration.Decoration) == 0 {
+			return len(x.decoration.Decoration) == 0
+		}
+		return x.decoration.Decoration[0].Anchor.Ticket < y.decoration.Decoration[0].Anchor.Ticket
+	}
+	return x.fileTicket < y.fileTicket
+}
+
+func createDecorationFragments(ctx context.Context, edges <-chan *srvpb.Edge, fragments disksort.Interface) error {
+	fdb := &assemble.DecorationFragmentBuilder{
+		Output: func(ctx context.Context, file string, fragment *srvpb.FileDecorations) error {
+			return fragments.Add(&decorationFragment{fileTicket: file, decoration: fragment})
+		},
+	}
+
+	for e := range edges {
+		if err := fdb.AddEdge(ctx, e); err != nil {
+			for range edges { // drain input channel
+			}
+			return err
+		}
+	}
+
+	return fdb.Flush(ctx)
+}
+
+func writeDecorAndRefs(ctx context.Context, opts *Options, edges <-chan *srvpb.Edge, out *servingOutput) error {
+	fragments, err := opts.diskSorter(fragmentLesser{}, fragmentMarshaler{})
 	if err != nil {
 		return err
 	}
-	defer it.Close()
 
-	log.Println("Writing Decorations")
+	log.Println("Writing decoration fragments")
+	if err := createDecorationFragments(ctx, edges, fragments); err != nil {
+		return err
+	}
 
-	var curFile string
-	var decor *srvpb.FileDecorations
-	for {
-		k, v, err := it.Next()
-		if err == io.EOF {
-			break
-		} else if err != nil {
-			return fmt.Errorf("error scanning temporary table: %v", err)
-		}
+	log.Println("Writing completed FileDecorations")
 
-		ss := strings.Split(string(k), tempTableKeySep)
-		if len(ss) != 2 {
-			return fmt.Errorf("invalid temporary table key: %q", string(k))
-		}
-		fileTicket := ss[0]
+	// refSorter stores a *ipb.CrossReference for each Decoration from fragments
+	refSorter, err := opts.diskSorter(refLesser{}, refMarshaler{})
+	if err != nil {
+		return fmt.Errorf("error creating sorter: %v", err)
+	}
+
+	buffer := out.xs.Buffered()
+	var (
+		curFile string
+		file    *srvpb.File
+		norm    *xrefs.Normalizer
+		decor   *srvpb.FileDecorations
+		targets map[string]*srvpb.Node
+	)
+	if err := fragments.Read(func(x interface{}) error {
+		df := x.(*decorationFragment)
+		fileTicket := df.fileTicket
+		fragment := df.decoration
 
 		if decor != nil && curFile != fileTicket {
-			if decor.FileTicket != "" {
-				if err := writeDecor(ctx, t, decor); err != nil {
+			if decor.File != nil {
+				if err := writeDecor(ctx, buffer, decor, targets); err != nil {
 					return err
 				}
+				file = nil
 			}
 			decor = nil
 		}
 		curFile = fileTicket
 		if decor == nil {
 			decor = &srvpb.FileDecorations{}
+			targets = make(map[string]*srvpb.Node)
 		}
 
-		var fragment srvpb.FileDecorations
-		if err := proto.Unmarshal(v, &fragment); err != nil {
-			return fmt.Errorf("invalid temporary table value: %v", err)
-		}
-
-		if fragment.FileTicket == "" {
+		if fragment.File == nil {
 			decor.Decoration = append(decor.Decoration, fragment.Decoration...)
+			for _, n := range fragment.Target {
+				targets[n.Ticket] = n
+			}
+			if file == nil {
+				return errors.New("missing file for anchors")
+			}
+
+			// Reverse each fragment.Decoration to create a *ipb.CrossReference
+			for _, d := range fragment.Decoration {
+				cr, err := assemble.CrossReference(file, norm, d, targets[d.Target])
+				if err != nil {
+					if opts.Verbose {
+						log.Printf("WARNING: error assembling cross-reference: %v", err)
+					}
+					continue
+				}
+				if err := refSorter.Add(cr); err != nil {
+					return fmt.Errorf("error adding CrossReference to sorter: %v", err)
+				}
+
+				// Snippet offsets aren't needed for the actual FileDecorations; they
+				// were only needed for the above CrossReference construction
+				d.Anchor.SnippetStart, d.Anchor.SnippetEnd = 0, 0
+			}
 		} else {
-			decor.FileTicket = fragment.FileTicket
-			decor.SourceText = fragment.SourceText
-			decor.Encoding = fragment.Encoding
+			decor.File = fragment.File
+			file = fragment.File
+			norm = xrefs.NewNormalizer(file.Text)
 		}
+
+		return nil
+	}); err != nil {
+		return fmt.Errorf("error reading decoration fragments: %v", err)
 	}
 
-	if decor != nil && decor.FileTicket != "" {
-		if err := writeDecor(ctx, t, decor); err != nil {
+	if decor != nil && decor.File != nil {
+		if err := writeDecor(ctx, buffer, decor, targets); err != nil {
 			return err
 		}
 	}
 
-	return nil
+	log.Println("Writing CrossReferences")
+
+	xb := &assemble.CrossReferencesBuilder{
+		MaxPageSize: opts.MaxPageSize,
+		Output: func(ctx context.Context, s *srvpb.PagedCrossReferences) error {
+			return buffer.Put(ctx, xsrv.CrossReferencesKey(s.SourceTicket), s)
+		},
+		OutputPage: func(ctx context.Context, p *srvpb.PagedCrossReferences_Page) error {
+			return buffer.Put(ctx, xsrv.CrossReferencesPageKey(p.PageKey), p)
+		},
+	}
+	var curTicket string
+	if err := refSorter.Read(func(i interface{}) error {
+		cr := i.(*ipb.CrossReference)
+
+		if curTicket != cr.Referent.Ticket {
+			curTicket = cr.Referent.Ticket
+			if err := xb.StartSet(ctx, cr.Referent); err != nil {
+				return fmt.Errorf("error starting cross-references set: %v", err)
+			}
+		}
+
+		g := &srvpb.PagedCrossReferences_Group{
+			Kind:   cr.TargetAnchor.Kind,
+			Anchor: []*srvpb.ExpandedAnchor{cr.TargetAnchor},
+		}
+		if err := xb.AddGroup(ctx, g); err != nil {
+			return fmt.Errorf("error adding cross-reference: %v", err)
+		}
+
+		return nil
+	}); err != nil {
+		return fmt.Errorf("error reading xrefs: %v", err)
+	}
+
+	if err := xb.Flush(ctx); err != nil {
+		return fmt.Errorf("error flushing cross-references: %v", err)
+	}
+
+	return buffer.Flush(ctx)
 }
 
-func writeDecor(ctx context.Context, t table.Proto, decor *srvpb.FileDecorations) error {
+func writeDecor(ctx context.Context, t table.BufferedProto, decor *srvpb.FileDecorations, targets map[string]*srvpb.Node) error {
+	for _, n := range targets {
+		decor.Target = append(decor.Target, n)
+	}
 	sort.Sort(assemble.ByOffset(decor.Decoration))
-	return t.Put(ctx, xrefs.DecorationsKey(decor.FileTicket), decor)
+	sort.Sort(assemble.ByTicket(decor.Target))
+	sort.Sort(assemble.ByAnchorTicket(decor.TargetDefinitions))
+	return t.Put(ctx, xsrv.DecorationsKey(decor.File.Ticket), decor)
 }
 
-func writeIndex(ctx context.Context, t table.Inverted, nodes <-chan *srvpb.Node) error {
-	for n := range nodes {
-		if err := search.IndexNode(ctx, t, n); err != nil {
-			return err
+type edgeLesser struct{}
+
+func (edgeLesser) Less(a, b interface{}) bool {
+	x, y := a.(*srvpb.Edge), b.(*srvpb.Edge)
+	if x.Source.Ticket == y.Source.Ticket {
+		if x.Target == nil || y.Target == nil {
+			return x.Target == nil
 		}
+		if x.Kind == y.Kind {
+			if x.Ordinal == y.Ordinal {
+				return x.Target.Ticket < y.Target.Ticket
+			}
+			return x.Ordinal < y.Ordinal
+		}
+		return x.Kind < y.Kind
 	}
-	return nil
+	return x.Source.Ticket < y.Source.Ticket
 }
 
-func drainEntries(entries <-chan *spb.Entry) {
-	for _ = range entries {
+type edgeMarshaler struct{}
+
+func (edgeMarshaler) Marshal(x interface{}) ([]byte, error) { return proto.Marshal(x.(proto.Message)) }
+
+func (edgeMarshaler) Unmarshal(rec []byte) (interface{}, error) {
+	var e srvpb.Edge
+	return &e, proto.Unmarshal(rec, &e)
+}
+
+type fragmentMarshaler struct{}
+
+func (fragmentMarshaler) Marshal(x interface{}) ([]byte, error) {
+	f := x.(*decorationFragment)
+	rec, err := proto.Marshal(f.decoration)
+	if err != nil {
+		return nil, err
 	}
+	return bytes.Join([][]byte{[]byte(f.fileTicket), rec}, []byte("\000")), nil
+}
+
+func (fragmentMarshaler) Unmarshal(rec []byte) (interface{}, error) {
+	ss := bytes.SplitN(rec, []byte("\000"), 2)
+	if len(ss) != 2 {
+		return nil, errors.New("invalid decorationFragment encoding")
+	}
+	var d srvpb.FileDecorations
+	if err := proto.Unmarshal(ss[1], &d); err != nil {
+		return nil, err
+	}
+	return &decorationFragment{
+		fileTicket: string(ss[0]),
+		decoration: &d,
+	}, nil
+}
+
+type refMarshaler struct{}
+
+func (refMarshaler) Marshal(x interface{}) ([]byte, error) { return proto.Marshal(x.(proto.Message)) }
+
+func (refMarshaler) Unmarshal(rec []byte) (interface{}, error) {
+	var e ipb.CrossReference
+	return &e, proto.Unmarshal(rec, &e)
+}
+
+type refLesser struct{}
+
+func (refLesser) Less(a, b interface{}) bool {
+	x, y := a.(*ipb.CrossReference), b.(*ipb.CrossReference)
+	if x.Referent.Ticket == y.Referent.Ticket {
+		if x.TargetAnchor == nil || y.TargetAnchor == nil {
+			return x.TargetAnchor == nil
+		} else if x.TargetAnchor.Kind == y.TargetAnchor.Kind {
+			if x.TargetAnchor.Span.Start.ByteOffset == y.TargetAnchor.Span.Start.ByteOffset {
+				if x.TargetAnchor.Span.End.ByteOffset == y.TargetAnchor.Span.End.ByteOffset {
+					if x.TargetAnchor.Parent == y.TargetAnchor.Parent {
+						return x.TargetAnchor.Ticket < y.TargetAnchor.Ticket
+					}
+					return x.TargetAnchor.Parent < y.TargetAnchor.Parent
+				}
+				return x.TargetAnchor.Span.End.ByteOffset < y.TargetAnchor.Span.End.ByteOffset
+			}
+			return x.TargetAnchor.Span.Start.ByteOffset < y.TargetAnchor.Span.Start.ByteOffset
+		}
+		return x.TargetAnchor.Kind < y.TargetAnchor.Kind
+	}
+	return x.Referent.Ticket < y.Referent.Ticket
 }

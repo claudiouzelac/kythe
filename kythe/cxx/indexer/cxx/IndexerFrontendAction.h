@@ -31,12 +31,14 @@
 #include <string>
 #include <utility>
 
+#include "glog/logging.h"
+#include "kythe/cxx/common/cxx_details.h"
+#include "kythe/cxx/common/kythe_metadata_file.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Frontend/FrontendAction.h"
 #include "clang/Lex/HeaderSearch.h"
 #include "clang/Lex/Preprocessor.h"
 #include "clang/Tooling/Tooling.h"
-#include "kythe/cxx/common/cxx_details.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/Twine.h"
 
@@ -65,10 +67,8 @@ bool RunToolOnCode(std::unique_ptr<clang::FrontendAction> tool_action,
 // TODO(jdennett): Consider moving/renaming this to kythe::ExtractIndexAction.
 class IndexerFrontendAction : public clang::ASTFrontendAction {
 public:
-  explicit IndexerFrontendAction(GraphObserver *GO,
-                                 const HeaderSearchInfo *Info)
-      : Observer(GO), HeaderConfigValid(Info != nullptr) {
-    assert(GO != nullptr);
+  IndexerFrontendAction(GraphObserver *GO, const HeaderSearchInfo *Info)
+      : Observer(CHECK_NOTNULL(GO)), HeaderConfigValid(Info != nullptr) {
     if (HeaderConfigValid) {
       HeaderConfig = *Info;
     }
@@ -85,6 +85,10 @@ public:
   /// \param T The behavior to use for template instantiations.
   void setTemplateMode(BehaviorOnTemplates T) { TemplateMode = T; }
 
+  /// \param Emit all data?
+  /// \param V Degree of verbosity.
+  void setVerbosity(Verbosity V) { Verbosity = V; }
+
 private:
   std::unique_ptr<clang::ASTConsumer>
   CreateASTConsumer(clang::CompilerInstance &CI,
@@ -96,9 +100,10 @@ private:
       unsigned CurrentIdx = 0;
       for (const auto &Path : HeaderConfig.paths) {
         const clang::DirectoryEntry *DirEnt =
-            FileManager.getDirectory(Path.first);
+            FileManager.getDirectory(Path.path);
         if (DirEnt != nullptr) {
-          Lookups.push_back(clang::DirectoryLookup(DirEnt, Path.second, false));
+          Lookups.push_back(clang::DirectoryLookup(
+              DirEnt, Path.characteristic_kind, Path.is_framework));
           ++CurrentIdx;
         } else {
           // This can happen if a path was included in the HeaderSearchInfo,
@@ -122,17 +127,18 @@ private:
       Observer->setLangOptions(&CI.getLangOpts());
       Observer->setPreprocessor(&CI.getPreprocessor());
     }
-    return llvm::make_unique<IndexerASTConsumer>(Observer, IgnoreUnimplemented,
-                                                 TemplateMode, Supports);
+    return llvm::make_unique<IndexerASTConsumer>(
+        Observer, IgnoreUnimplemented, TemplateMode, Verbosity, Supports);
   }
 
   bool BeginSourceFileAction(clang::CompilerInstance &CI,
                              llvm::StringRef Filename) override {
     if (Observer) {
       CI.getPreprocessor().addPPCallbacks(llvm::make_unique<IndexerPPCallbacks>(
-          CI.getPreprocessor(), *Observer));
+          CI.getPreprocessor(), *Observer, Verbosity));
     }
     CI.getLangOpts().CommentOpts.ParseAllComments = true;
+    CI.getLangOpts().RetainCommentsFromSystemHeaders = true;
     return true;
   }
 
@@ -144,6 +150,8 @@ private:
   BehaviorOnUnimplemented IgnoreUnimplemented = BehaviorOnUnimplemented::Abort;
   /// Whether to visit template instantiations.
   BehaviorOnTemplates TemplateMode = BehaviorOnTemplates::VisitInstantiations;
+  /// Whether to emit all data.
+  enum Verbosity Verbosity = kythe::Verbosity::Classic;
   /// Configuration information for header search.
   HeaderSearchInfo HeaderConfig;
   /// Whether to use HeaderConfig.
@@ -190,27 +198,47 @@ public:
   clang::FrontendAction *create() override { return Action.release(); }
 };
 
-/// \brief Indexes `Unit`, reading from `Files` in the assumed
-/// `EffectiveWorkingDirectory` and writing entries to `Output`.
+/// \brief Options that control how the indexer behaves.
+struct IndexerOptions {
+  /// \brief The directory to normalize paths against. Must be absolute.
+  std::string EffectiveWorkingDirectory = "/";
+  /// \brief What to do with template expansions.
+  BehaviorOnTemplates TemplateBehavior =
+      BehaviorOnTemplates::VisitInstantiations;
+  /// \brief What to do when we don't know what to do.
+  BehaviorOnUnimplemented UnimplementedBehavior =
+      BehaviorOnUnimplemented::Abort;
+  /// \brief Whether to emit all data.
+  enum Verbosity Verbosity = kythe::Verbosity::Classic;
+  /// \brief Enable experimental lossy claiming if true.
+  bool EnableLossyClaiming = false;
+  /// \brief Whether to allow access to the raw filesystem.
+  bool AllowFSAccess = false;
+  /// \brief Whether to drop data found to be template instantiation
+  /// independent.
+  bool DropInstantiationIndependentData = false;
+  /// \brief A function that is called as the indexer enters and exits various
+  /// phases of execution (in strict LIFO order).
+  ProfilingCallback ReportProfileEvent = [](const char *, ProfilingEvent) {};
+};
+
+/// \brief Indexes `Unit`, reading from `Files` in the assumed and writing
+/// entries to `Output`.
 /// \param Unit The CompilationUnit to index
-/// \param EffectiveWorkingDirectory The directory to normalize paths against.
-/// Must be absolute.
 /// \param Files A vector of files to read from. May be modified if the Unit
 /// does not contain a proper header search table.
 /// \param ClaimClient The claim client to use.
 /// \param Cache The hash cache to use, or nullptr if none.
-/// \param BOT What to do with template expansions.
-/// \param BOU What to do when we don't know what to do.
-/// \param AllowFSAccess Whether to allow access to the raw filesystem.
 /// \param Output The output stream to use.
+/// \param Options Configuration settings for this run.
+/// \param MetaSupports Metadata support for this run.
 /// \return empty if OK; otherwise, an error description.
 std::string IndexCompilationUnit(const proto::CompilationUnit &Unit,
-                                 const std::string &EffectiveWorkingDirectory,
                                  std::vector<proto::FileData> &Files,
                                  KytheClaimClient &ClaimClient,
-                                 HashCache *Cache, BehaviorOnTemplates BOT,
-                                 BehaviorOnUnimplemented BOU,
-                                 bool AllowFSAccess, KytheOutputStream &Output);
+                                 HashCache *Cache, KytheOutputStream &Output,
+                                 const IndexerOptions &Options,
+                                 const MetadataSupports *MetaSupports);
 
 } // namespace kythe
 

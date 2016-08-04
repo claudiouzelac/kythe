@@ -17,12 +17,12 @@
 # It should be run from the Kythe root.
 TEST_NAME="test_extract_transcript"
 . ./kythe/cxx/extractor/testdata/test_common.sh
-EXPECTED_INDEX="bf6996536fa134e8bbe2c1afb7937e8d47b79e0a135b0c6e4cfdae4707cac00a.kindex"
-INDEX_PATH="${OUT_DIR}"/"${EXPECTED_INDEX}"
-rm -f -- "${INDEX_PATH}_UNIT"
 KYTHE_OUTPUT_DIRECTORY="${OUT_DIR}" \
     "${EXTRACTOR}" --with_executable "/usr/bin/g++" \
     -I./kythe/cxx/extractor/testdata \
     ./kythe/cxx/extractor/testdata/transcript_main.cc
-"${KINDEX_TOOL}" -suppress_details -explode "${INDEX_PATH}"
-diff "${BASE_DIR}/transcript_main.UNIT${PF_SUFFIX}" "${INDEX_PATH}_UNIT"
+[[ $(ls -1 "${OUT_DIR}"/*.kindex | wc -l) -eq 1 ]]
+INDEX_PATH=$(ls -1 "${OUT_DIR}"/*.kindex)
+"${KINDEX_TOOL}" -canonicalize_hashes -suppress_details -explode "${INDEX_PATH}"
+sed "s|TEST_CWD|${PWD}/|" "${BASE_DIR}/transcript_main.UNIT" | \
+    diff - "${INDEX_PATH}_UNIT"

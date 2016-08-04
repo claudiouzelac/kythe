@@ -25,10 +25,11 @@
 
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Frontend/FrontendAction.h"
-#include "clang/Lex/HeaderSearch.h"
 #include "clang/Lex/MacroArgs.h"
 #include "clang/Lex/PPCallbacks.h"
 #include "clang/Lex/Preprocessor.h"
+#include "clang/Tooling/Tooling.h"
+
 #include "gflags/gflags.h"
 #include "glog/logging.h"
 #include "kythe/cxx/common/CommandLineUtils.h"
@@ -37,6 +38,7 @@
 #include "kythe/cxx/common/proto_conversions.h"
 #include "kythe/proto/analysis.pb.h"
 #include "kythe/proto/cxx.pb.h"
+#include "llvm/Support/TargetSelect.h"
 #include "third_party/llvm/src/clang_builtin_headers.h"
 #include "third_party/llvm/src/cxx_extractor_preprocessor_utils.h"
 
@@ -49,7 +51,7 @@ static constexpr char kHexDigits[] = "0123456789abcdef";
 /// \brief Lowercase-string-hex-encodes the array sha_buf.
 /// \param sha_buf The bytes of the hash.
 static std::string LowercaseStringHexEncodeSha(
-    const unsigned char(&sha_buf)[SHA256_DIGEST_LENGTH]) {
+    const unsigned char (&sha_buf)[SHA256_DIGEST_LENGTH]) {
   std::string sha_text(SHA256_DIGEST_LENGTH * 2, '\0');
   for (unsigned i = 0; i < SHA256_DIGEST_LENGTH; ++i) {
     sha_text[i * 2] = kHexDigits[(sha_buf[i] >> 4) & 0xF];
@@ -433,7 +435,8 @@ void ExtractorPPCallbacks::AddFile(const clang::FileEntry* file,
                                                buffer->getBufferEnd());
     contents.first->second.vname.CopyFrom(index_writer_->VNameForPath(
         RelativizePath(path, index_writer_->root_directory())));
-    LOG(INFO) << "added content for " << path << "\n";
+    LOG(INFO) << "added content for " << path << ": mapped to "
+              << contents.first->second.vname.DebugString() << "\n";
   }
 }
 
@@ -716,52 +719,58 @@ class ExtractorAction : public clang::PreprocessorFrontendAction {
                             ? main_source_file_
                             : main_source_file_stdin_alternate_;
     // Include information about the header search state in the CU.
-    auto& header_search_info =
+    const auto& header_search_options =
+        getCompilerInstance().getHeaderSearchOpts();
+    const auto& header_search_info =
         getCompilerInstance().getPreprocessor().getHeaderSearchInfo();
     HeaderSearchInfo info;
-    bool info_valid = true;
-    info.angled_dir_idx = header_search_info.search_dir_size();
-    info.system_dir_idx = header_search_info.search_dir_size();
-    // TODO(zarko): Record module flags (::DisableModuleHash, ::ModuleMaps)
-    // from HeaderSearchOptions; support "apple-style headermaps" (see
-    // Clang's InitHeaderSearch.cpp.)
-    unsigned cur_dir_idx = 0;
-    // Clang never sets no_cur_dir_search to true? (see InitHeaderSearch.cpp)
-    bool no_cur_dir_search = false;
-    auto first_angled_dir = header_search_info.angled_dir_begin();
-    auto first_system_dir = header_search_info.system_dir_begin();
-    auto last_dir = header_search_info.system_dir_end();
-    for (const auto& prefix :
-         getCompilerInstance().getHeaderSearchOpts().SystemHeaderPrefixes) {
-      info.system_prefixes.push_back(
-          std::make_pair(prefix.Prefix, prefix.IsSystemHeader));
-    }
-    std::vector<std::string> paths;
-    for (auto i = header_search_info.search_dir_begin(); i != last_dir;
-         ++cur_dir_idx, ++i) {
-      if (i == first_angled_dir) {
-        info.angled_dir_idx = cur_dir_idx;
-      } else if (i == first_system_dir) {
-        info.system_dir_idx = cur_dir_idx;
-      }
-      // TODO(zarko): Support non-LT_NormalDir entries (these are frameworks
-      // and header maps).
-      if (!i->isNormalDir()) {
-        LOG(WARNING) << "Can't reproduce include lookup state for "
-                     << main_source_file_ << ": " << i->getName()
-                     << " is not a normal directory.";
-        info_valid = false;
-        break;
-      }
-      info.paths.push_back(
-          std::make_pair(i->getName(), i->getDirCharacteristic()));
-    }
+    bool info_valid = info.CopyFrom(header_search_options, header_search_info);
+    RecordModuleInfo(&header_search_info.getModuleMap());
     callback_(main_source_file_, main_source_file_transcript_, source_files_,
               info_valid ? &info : nullptr,
               getCompilerInstance().getDiagnostics().hasErrorOccurred());
   }
 
  private:
+  void RecordModuleInfo(const clang::ModuleMap* module_map) {
+    // TODO(zarko): Record module flags (::DisableModuleHash, ::ModuleMaps)
+    // from HeaderSearchOptions; support "apple-style headermaps" (see
+    // Clang's InitHeaderSearch.cpp.)
+    auto* source_manager = &getCompilerInstance().getSourceManager();
+    for (auto modules = module_map->module_begin(),
+              modules_end = module_map->module_end();
+         modules != modules_end; ++modules) {
+      auto* module = modules->second;
+      if (module->DefinitionLoc.isInvalid() ||
+          !module->DefinitionLoc.isFileID()) {
+        LOG(WARNING) << "Module " << module->Name
+                     << " has an invalid or non-file definition location.";
+        continue;
+      }
+      auto file_id = source_manager->getFileID(module->DefinitionLoc);
+      if (file_id.isInvalid()) {
+        LOG(WARNING) << "Module " << module->Name << " has an invalid file ID.";
+        continue;
+      }
+      if (const auto* file = source_manager->getFileEntryForID(file_id)) {
+        auto contents = source_files_.insert(
+            std::make_pair(file->getName(), SourceFile{std::string()}));
+        if (contents.second) {
+          const llvm::MemoryBuffer* buffer =
+              source_manager->getMemoryBufferForFile(file);
+          contents.first->second.file_content.assign(buffer->getBufferStart(),
+                                                     buffer->getBufferEnd());
+          contents.first->second.vname.CopyFrom(
+              index_writer_->VNameForPath(RelativizePath(
+                  file->getName(), index_writer_->root_directory())));
+          LOG(INFO) << "added module map content for " << file->getName();
+        }
+      } else {
+        LOG(WARNING) << "Module " << module->Name << " is missing a FileEntry.";
+      }
+    }
+  }
+
   ExtractorCallback callback_;
   /// The main source file for the compilation (assuming only one).
   std::string main_source_file_;
@@ -857,7 +866,6 @@ bool IndexWriter::SetVNameConfiguration(const std::string& json) {
 
 kythe::proto::VName IndexWriter::VNameForPath(const std::string& path) {
   kythe::proto::VName out = vname_generator_.LookupVName(path);
-  out.set_language("c++");
   if (out.corpus().empty()) {
     out.set_corpus(corpus_);
   }
@@ -867,7 +875,7 @@ kythe::proto::VName IndexWriter::VNameForPath(const std::string& path) {
 void IndexWriter::FillFileInput(
     const std::string& clang_path, const SourceFile& source_file,
     kythe::proto::CompilationUnit_FileInput* file_input) {
-  CHECK(!source_file.vname.language().empty());
+  CHECK(source_file.vname.language().empty());
   file_input->mutable_v_name()->CopyFrom(source_file.vname);
   // This path is distinct from the VName path. It is used by analysis tools
   // to configure Clang's virtual filesystem.
@@ -896,7 +904,8 @@ void IndexWriter::WriteIndex(
     std::unique_ptr<IndexWriterSink> sink, const std::string& main_source_file,
     const std::string& entry_context,
     const std::unordered_map<std::string, SourceFile>& source_files,
-    const HeaderSearchInfo* header_search_info, bool had_errors) {
+    const HeaderSearchInfo* header_search_info, bool had_errors,
+    const std::string& clang_working_dir) {
   kythe::proto::CompilationUnit unit;
   std::string identifying_blob;
   identifying_blob.append(corpus_);
@@ -911,24 +920,13 @@ void IndexWriter::WriteIndex(
 
   kythe::proto::VName main_vname = VNameForPath(main_source_file);
   unit_vname->CopyFrom(main_vname);
+  unit_vname->set_language("c++");
   unit_vname->set_signature("cu#" + identifying_blob_digest);
   unit_vname->clear_path();
 
   if (header_search_info != nullptr) {
     kythe::proto::CxxCompilationUnitDetails cxx_details;
-    auto* info = cxx_details.mutable_header_search_info();
-    info->set_first_angled_dir(header_search_info->angled_dir_idx);
-    info->set_first_system_dir(header_search_info->system_dir_idx);
-    for (const auto& path : header_search_info->paths) {
-      auto* dir = info->add_dir();
-      dir->set_path(path.first);
-      dir->set_characteristic_kind(path.second);
-    }
-    for (const auto& prefix : header_search_info->system_prefixes) {
-      auto* proto = cxx_details.add_system_header_prefix();
-      proto->set_is_system_header(prefix.second);
-      proto->set_prefix(prefix.first);
-    }
+    header_search_info->CopyTo(&cxx_details);
     PackAny(cxx_details, kCxxCompilationUnitDetailsURI, unit.add_details());
   }
 
@@ -938,7 +936,15 @@ void IndexWriter::WriteIndex(
   unit.set_entry_context(entry_context);
   unit.set_has_compile_errors(had_errors);
   unit.add_source_file(main_source_file);
-  unit.set_working_directory(root_directory_);
+  llvm::SmallString<256> absolute_working_directory(
+      llvm::StringRef(clang_working_dir.data(), clang_working_dir.size()));
+  std::error_code err =
+      llvm::sys::fs::make_absolute(absolute_working_directory);
+  if (err) {
+    LOG(WARNING) << "Can't get working directory: " << err.message();
+  } else {
+    unit.set_working_directory(absolute_working_directory.c_str());
+  }
   sink->OpenIndex(output_directory_, identifying_blob_digest);
   sink->WriteHeader(unit);
   unsigned info_index = 0;
@@ -996,10 +1002,15 @@ void ExtractorConfiguration::SetVNameConfig(const std::string& path) {
 
 void ExtractorConfiguration::SetArgs(const std::vector<std::string>& args) {
   final_args_ = args;
-  std::string actual_executable = final_args_.size() ? final_args_[0] : "";
+  std::string executable = final_args_.size() ? final_args_[0] : "";
   if (final_args_.size() >= 3 && final_args_[1] == "--with_executable") {
-    final_args_.assign(final_args_.begin() + 2, final_args_.end());
+    executable = final_args_[2];
+    final_args_.erase(final_args_.begin() + 1, final_args_.begin() + 3);
   }
+  // TODO(zarko): Does this really need to be InitializeAllTargets()?
+  // We may have made the precondition too strict.
+  llvm::InitializeAllTargetInfos();
+  clang::tooling::addTargetAndModeForProgramName(final_args_, executable);
   final_args_ = common::GCCArgsToClangSyntaxOnlyArgs(final_args_);
   // Check to see if an alternate resource-dir was specified; otherwise,
   // invent one. We need this to find stddef.h and friends.
@@ -1028,13 +1039,15 @@ void ExtractorConfiguration::InitializeFromEnvironment() {
   }
   if (const char* env_root_directory = getenv("KYTHE_ROOT_DIRECTORY")) {
     index_writer_.set_root_directory(env_root_directory);
-    file_system_options_.WorkingDir = env_root_directory;
   }
   if (const char* env_index_pack = getenv("KYTHE_INDEX_PACK")) {
     using_index_packs_ = (strlen(env_index_pack) != 0);
   }
   if (const char* env_output_directory = getenv("KYTHE_OUTPUT_DIRECTORY")) {
     index_writer_.set_output_directory(env_output_directory);
+  }
+  if (const char* env_output_file = getenv("KYTHE_OUTPUT_FILE")) {
+    SetKindexOutputFile(env_output_file);
   }
 }
 
@@ -1054,7 +1067,8 @@ void ExtractorConfiguration::Extract() {
           sink.reset(new KindexWriterSink(kindex_path_));
         }
         index_writer_.WriteIndex(std::move(sink), main_source_file, transcript,
-                                 source_files, header_search_info, had_errors);
+                                 source_files, header_search_info, had_errors,
+                                 file_system_options_.WorkingDir);
       });
   clang::tooling::ToolInvocation invocation(final_args_, extractor.release(),
                                             file_manager.get());

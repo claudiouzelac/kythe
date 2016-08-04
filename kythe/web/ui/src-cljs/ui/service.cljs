@@ -56,28 +56,38 @@
      :handler (comp handler unwrap-dir-response)
      :error-handler error-handler}))
 
-(defn- unwrap-edges-response [resp]
-  {:edge_set (:edge_set resp)
-   :nodes (into {} (map (juxt :ticket
-                          #(into {} (map (juxt :name (comp b64/decodeString :value)) (:fact %))))
-                     (:node resp)))
+(defn- unwrap-node [node]
+  {:facts (into {}
+                (map (juxt first
+                           (comp util/fix-encoding b64/decodeString second))
+                     (:facts node)))})
+
+(defn- unwrap-xrefs-response [resp]
+  {:cross-references (if (= 1 (count (:cross_references resp)))
+                       (second (first (:cross_references resp)))
+                       (:cross_references resp))
+   :nodes (into {} (map (juxt first (comp unwrap-node second)) (:nodes resp)))
    :next (:next_page_token resp)})
 
-(defn get-edges
-  "Requests the outward edges from the given node ticket"
+(defn get-xrefs
+  "Requests the global references, definitions, declarations, and documentation of the given node ticket."
   ([ticket handler error-handler]
-   (get-edges ticket {} handler error-handler))
+   (get-xrefs ticket {} handler error-handler))
   ([ticket opts handler error-handler]
-   (POST "edges"
-     {:params (merge {:filter [schema/node-kind-fact
-                               schema/anchor-loc-filter]
+   (POST "xrefs"
+     {:params (merge {:definition_kind    "BINDING_DEFINITIONS"
+                      :declaration_kind   "ALL_DECLARATIONS"
+                      :reference_kind     "ALL_REFERENCES"
+                      :documentation_kind "ALL_DOCUMENTATION"
+                      :filter [schema/node-kind-fact]
+                      :anchor_text true
                       :page_size 20}
                 opts
                 {:ticket (if (seq? ticket) ticket [ticket])})
       :format :json
       :response-format :json
       :keywords? true
-      :handler (comp handler unwrap-edges-response)
+      :handler (comp handler unwrap-xrefs-response)
       :error-handler error-handler})))
 
 (defn get-file
@@ -86,23 +96,10 @@
   (POST "decorations"
     {:params {:location {:ticket ticket}
               :source_text true
-              :references true}
+              :references true
+              :target_definitions true}
      :format :json
      :response-format :json
      :keywords? true
      :handler handler
-     :error-handler error-handler}))
-
-(defn get-search
-  "Searches for nodes by partial VName and known fact values"
-  [query handler error-handler]
-  (POST "search"
-    {:params (assoc query :fact
-               (for [{:keys [name value]} (:fact query)]
-                 {:name name
-                  :value (b64/encodeString value)}))
-     :format :json
-     :response-format :json
-     :keywords? true
-     :handler (comp handler :ticket)
      :error-handler error-handler}))

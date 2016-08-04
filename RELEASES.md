@@ -1,9 +1,121 @@
 # Release Notes
 
-## Upcoming release
+## v0.0.23
+
+Notable changes:
+ - CrossReferences API: hide signature generation behind feature flag
+ - Java indexer: emit `ref/imports` anchors for imported symbols
+
+Notable additions:
+ - Java indexer: emit basic `format` facts
+
+## v0.0.22
+
+Notable changes:
+ - Schema: `callable` nodes and `callableas` edges have been removed.
+ - `xrefs.CrossReferences`: change Anchors in the reply to RelatedAnchors
+ - Removed search API
+
+## v0.0.21
+
+Notable changes:
+ - xrefs service: replace most repeated fields with maps
+ - xrefs service: add `ordinal` field to each EdgeSet edge
+ - `xrefs.CrossReferences`: group declarations/definitions for incomplete nodes
+ - C++ indexer: `--flush_after_each_entry` now defaults to `true`
+
+Notable additions:
+ - `xrefs.Decorations`: add experimental `target_definitions` switch
+ - kythe tool: add `--graphviz` output flag to `edges` subcommand
+ - kythe tool: add `--target_definitions` switch to `decor` subcommand
+
+Notable fixes:
+  `write_tables`: correctly handle nodes with missing facts
+ - Javac extractor: add processors registered in META-INF/services
+ - javac-wrapper.sh: prepend bootclasspath jar to use packaged javac tools
+
+## v0.0.20
+
+Notable fixes:
+ - Java indexer: reduce redundant AST traversals causing large slowdowns
+
+## v0.0.19
+
+Notable changes:
+ - C++ extractor: `KYTHE_ROOT_DIRECTORY` no longer changes the working
+   directory during extraction, but does still change the root for path
+   normalization.
+ - `http_server`: ensure the given `--serving_table` exists (do not create, if missing)
+ - Java indexer: fixes/tests for interfaces, which now have `extends` edges
+ - `kythe` tool: display subkinds for related nodes in xrefs subcommand
+
+Notable additions:
+ - `entrystream`: add `--unique` flag
+ - `write_tables`: add `--entries` flag
+
+## v0.0.18
+
+Notable changes:
+ - C++ indexer: `--ignore_unimplemented` now defaults to `true`
+ - Java indexer: emit single anchor for package in qualified identifiers
+
+Notable additions:
+ - Java indexer: add callgraph edges
+ - Java indexer: add Java 8 member reference support
+
+## v0.0.17
+
+Notable additions:
+ - `write_tables`: produce serving data for xrefs.CrossReferences method
+ - `write_tables`: add flags to tweak performance
+     - `--compress_shards`: determines whether intermediate data written to disk
+       should be compressed
+     - `--max_shard_size`: maximum number of elements (edges, decoration
+       fragments, etc.) to keep in-memory before flushing an intermediary data
+       shard to disk
+     - `--shard_io_buffer`: size of the reading/writing buffers for the
+       intermediary data shards
+
+## v0.0.16
+
+Notable changes:
+ - Denormalize the serving table format
+ - xrefs.Decorations: only return Reference targets in DecorationsReply.Nodes
+ - Use proto3 JSON mapping for web requests: https://developers.google.com/protocol-buffers/docs/proto3#json
+ - Java indexer: report error when indexing from compilation's source root
+ - Consistently use corpus root relative paths in filetree API
+ - Java, C++ indexer: ensure file node VNames to be schema compliant
+ - Schema: File nodes should no longer have the `language` VName field set
+
+Notable additions:
+ - Java indexer: emit (possibly multi-line) snippets over entire surrounding statement
+ - Java indexer: emit class node for static imports
+
+Notable fixes:
+ - Java extractor: correctly parse @file arguments using javac CommandLine parser
+ - Java extractor: correctly parse/load -processor classes
+ - xrefs.Edges: correctly return empty page_token on last page (when filtering by edge kinds)
+
+## v0.0.15
+
+Notable changes:
+ - Java 8 is required for the Java extractor/indexer
+
+Notable fixes:
+ - `write_tables`: don't crash when given a node without any edges
+ - Java extractor: ensure output directory exists before writing kindex
+
+## v0.0.14
+
+Notable fixes:
+ - Bazel Java extractor: filter out Bazel-specific flags
+ - Java extractor/indexer: filter all unsupported options before yielding to the compiler
+
+## v0.0.13
 
 Notable additions:
  - Java indexer: add `ref/doc` anchors for simple class references in JavaDoc
+ - Java indexer: emit JavaDoc comments more consistently; emit enum documentation
 
 ## v0.0.12
 

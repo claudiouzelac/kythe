@@ -26,7 +26,6 @@ import com.google.common.base.Strings;
 import com.google.common.collect.HashMultimap;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
-import com.google.common.collect.Maps;
 import com.google.common.collect.Multimap;
 import com.google.common.collect.Sets;
 import com.google.common.io.ByteStreams;
@@ -36,6 +35,7 @@ import com.google.devtools.kythe.extractors.shared.CompilationFileInputComparato
 import com.google.devtools.kythe.extractors.shared.ExtractionException;
 import com.google.devtools.kythe.extractors.shared.ExtractorUtils;
 import com.google.devtools.kythe.extractors.shared.FileVNames;
+import com.google.devtools.kythe.platform.java.JavacOptionsUtils;
 import com.google.devtools.kythe.proto.Analysis.CompilationUnit;
 import com.google.devtools.kythe.proto.Analysis.CompilationUnit.FileInput;
 import com.google.devtools.kythe.proto.Analysis.FileData;
@@ -43,7 +43,6 @@ import com.google.devtools.kythe.proto.Java.JavaDetails;
 import com.google.devtools.kythe.proto.Storage.VName;
 import com.google.devtools.kythe.util.DeleteRecursively;
 import com.google.protobuf.Any;
-
 import com.sun.source.tree.CompilationUnitTree;
 import com.sun.source.tree.ExpressionTree;
 import com.sun.source.tree.ImportTree;
@@ -51,24 +50,34 @@ import com.sun.source.util.JavacTask;
 import com.sun.tools.javac.api.JavacTaskImpl;
 import com.sun.tools.javac.code.Symbol.ClassSymbol;
 import com.sun.tools.javac.code.Symtab;
-
+import com.sun.tools.javac.main.Option;
+import com.sun.tools.javac.util.ServiceLoader;
 import java.io.File;
+import java.io.IOError;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.JarURLConnection;
 import java.net.MalformedURLException;
 import java.net.URI;
 import java.net.URL;
 import java.net.URLClassLoader;
+import java.net.URLConnection;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.EnumSet;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
-
 import javax.annotation.processing.Processor;
 import javax.tools.Diagnostic;
 import javax.tools.DiagnosticCollector;
@@ -82,14 +91,12 @@ import javax.tools.StandardLocation;
 import javax.tools.ToolProvider;
 
 /**
- * Extracts all required information (set of source files, class paths,
- * and compiler options) from a java compilation command and stores the
- * information to replay the compilation.
+ * Extracts all required information (set of source files, class paths, and compiler options) from a
+ * java compilation command and stores the information to replay the compilation.
  *
- * The extractor runs the Javac compiler to get a exact description of all files
- * required for the compilation as a whole. It then creates CompilationUnit entries
- * for each source file. We do not do this on a per file basis as the Java
- * Compiler takes too long to do this.
+ * <p>The extractor runs the Javac compiler to get a exact description of all files required for the
+ * compilation as a whole. It then creates CompilationUnit entries for each source file. We do not
+ * do this on a per file basis as the Java Compiler takes too long to do this.
  */
 public class JavaCompilationUnitExtractor {
   public static final String JAVA_DETAILS_URL = "kythe.io/proto/kythe.proto.JavaDetails";
@@ -98,10 +105,7 @@ public class JavaCompilationUnitExtractor {
       FormattingLogger.getLogger(JavaCompilationUnitExtractor.class);
 
   private static final String JAR_SCHEME = "jar";
-
-  @VisibleForTesting
-  static final String JAR_ROOT = "!jar!";
-
+  @VisibleForTesting static final String JAR_ROOT = "!jar!";
   private final String jdkJar;
   private final String rootDirectory;
   private final boolean trackUnusedDependencies;
@@ -136,8 +140,10 @@ public class JavaCompilationUnitExtractor {
       throws ExtractionException {
     this(fileVNames, rootDirectory, false);
   }
-  public JavaCompilationUnitExtractor(FileVNames fileVNames, String rootDirectory,
-      boolean trackUnusedDependencies) throws ExtractionException {
+
+  public JavaCompilationUnitExtractor(
+      FileVNames fileVNames, String rootDirectory, boolean trackUnusedDependencies)
+      throws ExtractionException {
     this.fileVNames = fileVNames;
     this.trackUnusedDependencies = trackUnusedDependencies;
 
@@ -147,7 +153,7 @@ public class JavaCompilationUnitExtractor {
       // the java.home variable is terminated with "/bin/..".
       // However, this is not the case for the class files
       // that we are trying to filter.
-      this.jdkJar = "file:" + javaHome.toRealPath(NOFOLLOW_LINKS);
+      this.jdkJar = javaHome.toRealPath(NOFOLLOW_LINKS).toString();
     } catch (IOException e) {
       throw new ExtractionException("JDK path not found: " + javaHome, e, false);
     }
@@ -163,18 +169,22 @@ public class JavaCompilationUnitExtractor {
     return rootDirectory;
   }
 
-  private CompilationUnit buildCompilationUnit(String target, Iterable<String> options,
-      Iterable<FileInput> requiredInputs, boolean hasErrors,
-      Set<String> newSourcePath, Set<String> newClassPath, List<String> sourceFiles,
-      String outputPath, Set<String> unusedJars) {
+  private CompilationUnit buildCompilationUnit(
+      String target,
+      Iterable<String> options,
+      Iterable<FileInput> requiredInputs,
+      boolean hasErrors,
+      Set<String> newSourcePath,
+      Set<String> newClassPath,
+      List<String> sourceFiles,
+      String outputPath,
+      Set<String> unusedJars) {
     CompilationUnit.Builder unit = CompilationUnit.newBuilder();
-    unit.setVName(VName.newBuilder()
-        .setSignature(target)
-        .setLanguage("java"));
+    unit.setVName(VName.newBuilder().setSignature(target).setLanguage("java"));
     unit.addAllArgument(options);
-    unit.addArgument("-sourcepath");
+    unit.addArgument(Option.SOURCEPATH.getText());
     unit.addArgument(Joiner.on(":").join(newSourcePath));
-    unit.addArgument("-cp");
+    unit.addArgument(Option.CP.getText());
     unit.addArgument(Joiner.on(":").join(newClassPath));
     unit.setHasCompileErrors(hasErrors);
     unit.addAllRequiredInput(requiredInputs);
@@ -182,39 +192,45 @@ public class JavaCompilationUnitExtractor {
       unit.addSourceFile(sourceFile);
     }
     unit.setOutputKey(outputPath);
-    unit.addDetails(Any.newBuilder()
-        .setTypeUrl(JAVA_DETAILS_URL)
-        .setValue(JavaDetails.newBuilder()
-            .addAllClasspath(newClassPath)
-            .addAllSourcepath(newSourcePath)
-            .build()
-            .toByteString()));
+    unit.addDetails(
+        Any.newBuilder()
+            .setTypeUrl(JAVA_DETAILS_URL)
+            .setValue(
+                JavaDetails.newBuilder()
+                    .addAllClasspath(newClassPath)
+                    .addAllSourcepath(newSourcePath)
+                    .build()
+                    .toByteString()));
     return unit.build();
   }
 
   /**
-   * Indexes a compilation unit to the bigtable. The extraction process will
-   * try to build a minimum set of what is needed to replay the compilation.
-   * To do this it runs the java compiler, and tracks all .class & .java files
-   * that are needed. It then builds up a new classpath & sourcepath that only
-   * contains the minimum set of paths required to replay the compilation.
+   * Indexes a compilation unit to the bigtable. The extraction process will try to build a minimum
+   * set of what is needed to replay the compilation. To do this it runs the java compiler, and
+   * tracks all .class & .java files that are needed. It then builds up a new classpath & sourcepath
+   * that only contains the minimum set of paths required to replay the compilation.
    *
-   * New classpath: because we extract classes from the jars into a temp path
-   * that needs to be set. Also we only use the classpaths that are actually
-   * used, not the ones that are provided.
-   * New sourcepath: as we're doing a partial compilation, we need to set up the
-   * source path to correctly load any files that are not the main compilation
-   * but are needed to perform compilation. This is not required when doing a
-   * full compilation as all sources are automatically loaded.
+   * <p>New classpath: because we extract classes from the jars into a temp path that needs to be
+   * set. Also we only use the classpaths that are actually used, not the ones that are provided.
+   * New sourcepath: as we're doing a partial compilation, we need to set up the source path to
+   * correctly load any files that are not the main compilation but are needed to perform
+   * compilation. This is not required when doing a full compilation as all sources are
+   * automatically loaded.
    *
-   * Next we store all required files in the bigtable and writes the
-   * CompilationUnit to the bigtable.
+   * <p>Next we store all required files in the bigtable and writes the CompilationUnit to the
+   * bigtable.
    *
    * @throws ExtractionException if anything blocks the indexing to be completed.
    */
-  public CompilationDescription extract(String target, Iterable<String> sources,
-      Iterable<String> classpath, Iterable<String> sourcepath, Iterable<String> processorpath,
-      Iterable<String> processors, Iterable<String> options, String outputPath)
+  public CompilationDescription extract(
+      String target,
+      Iterable<String> sources,
+      Iterable<String> classpath,
+      Iterable<String> sourcepath,
+      Iterable<String> processorpath,
+      Iterable<String> processors,
+      Iterable<String> options,
+      String outputPath)
       throws ExtractionException {
     Preconditions.checkNotNull(target);
     Preconditions.checkNotNull(sources);
@@ -225,11 +241,17 @@ public class JavaCompilationUnitExtractor {
     Preconditions.checkNotNull(options);
     Preconditions.checkNotNull(outputPath);
 
-    final AnalysisResults results = runJavaAnalysisToExtractCompilationDetails(sources, classpath,
-        sourcepath, processorpath, processors, options, outputPath);
+    AnalysisResults results;
+    if (sources.iterator().hasNext()) {
+      results =
+          runJavaAnalysisToExtractCompilationDetails(
+              sources, classpath, sourcepath, processorpath, processors, options);
+    } else {
+      results = new AnalysisResults();
+    }
 
     List<FileData> fileContents = ExtractorUtils.convertBytesToFileDatas(results.fileContents);
-    List<FileInput> compilationFileInputs = Lists.newLinkedList();
+    List<FileInput> compilationFileInputs = new LinkedList<>();
     for (FileData data : fileContents) {
       String relativePath = results.relativePaths.get(data.getInfo().getPath());
       VName vname = fileVNames.lookupBaseVName(relativePath);
@@ -237,53 +259,47 @@ public class JavaCompilationUnitExtractor {
         vname = vname.toBuilder().setPath(data.getInfo().getPath()).build();
       }
       String sourceBasename = results.sourceFileNames.get(data.getInfo().getPath());
-      if (sourceBasename != null && vname.getPath().endsWith(".java")
+      if (sourceBasename != null
+          && vname.getPath().endsWith(".java")
           && !vname.getPath().endsWith(sourceBasename)) {
         Path fixedPath = Paths.get(vname.getPath()).getParent().resolve(sourceBasename);
         vname = vname.toBuilder().setPath(fixedPath.toString()).build();
       }
-      compilationFileInputs.add(FileInput.newBuilder()
-          .setInfo(data.getInfo())
-          .setVName(vname)
-          .build());
+      compilationFileInputs.add(
+          FileInput.newBuilder().setInfo(data.getInfo()).setVName(vname).build());
     }
     Collections.sort(compilationFileInputs, CompilationFileInputComparator.getComparator());
 
-    CompilationUnit compilationUnit = buildCompilationUnit(target, removeOutputDirOption(options),
-        compilationFileInputs, results.hasErrors, results.newSourcePath, results.newClassPath,
-        results.explicitSources,
-        ExtractorUtils.tryMakeRelative(rootDirectory, outputPath), results.unusedJars);
+    CompilationUnit compilationUnit =
+        buildCompilationUnit(
+            target,
+            removeDestDirOptions(options),
+            compilationFileInputs,
+            results.hasErrors,
+            results.newSourcePath,
+            results.newClassPath,
+            results.explicitSources,
+            ExtractorUtils.tryMakeRelative(rootDirectory, outputPath),
+            results.unusedJars);
     return new CompilationDescription(compilationUnit, fileContents);
   }
 
-  /**
-   * Removing -d option before we build the compilation unit data for storing.
-   *
-   * @return a new list of options which does not contain {@code -d} and its argument
-   */
-  private static List<String> removeOutputDirOption(Iterable<String> options) {
-    List<String> newOptions = Lists.newArrayList(options);
-    int dashDIndex = newOptions.indexOf("-d");
-    if (dashDIndex >= 0 && (dashDIndex + 1 < newOptions.size())) {
-      newOptions.subList(dashDIndex, dashDIndex + 2).clear();
-    }
-    int dashSIndex = newOptions.indexOf("-s");
-    if (dashSIndex >= 0 && (dashSIndex + 1 < newOptions.size())) {
-      newOptions.subList(dashSIndex, dashSIndex + 2).clear();
-    }
-    return newOptions;
+  /** Returns a new list with the same options except any destination directory options. */
+  private static List<String> removeDestDirOptions(Iterable<String> options) {
+    return JavacOptionsUtils.removeOptions(
+        Lists.newArrayList(options), EnumSet.of(Option.D, Option.S, Option.H));
   }
 
   /**
-   * If the code has wildcard imports (e.g. import foo.bar.*) but doesn't
-   * actually use any of the imports, errors will happen.
-   * We don't get callbacks for file open of these files (since they aren't used)
-   * but when java runs it will report errors if it can't find any files to match
-   * the wildcard.  So we add one matching file here.
+   * If the code has wildcard imports (e.g. import foo.bar.*) but doesn't actually use any of the
+   * imports, errors will happen. We don't get callbacks for file open of these files (since they
+   * aren't used) but when java runs it will report errors if it can't find any files to match the
+   * wildcard. So we add one matching file here.
    */
   private void findOnDemandImportedFiles(
       Iterable<? extends CompilationUnitTree> compilationUnits,
-      UsageAsInputReportingFileManager fileManager) throws ExtractionException {
+      UsageAsInputReportingFileManager fileManager)
+      throws ExtractionException {
     // Maps package names to source files that wildcard import them.
     Multimap<String, String> pkgs = HashMultimap.create();
 
@@ -299,45 +315,61 @@ public class JavaCompilationUnitExtractor {
         if (!qualifiedIdentifier.endsWith(".*")) {
           continue;
         }
-        pkgs.put(qualifiedIdentifier.substring(0, qualifiedIdentifier.length() - 2),
+        pkgs.put(
+            qualifiedIdentifier.substring(0, qualifiedIdentifier.length() - 2),
             unit.getSourceFile().getName());
       }
     }
 
     for (Map.Entry<String, Collection<String>> pkg : pkgs.asMap().entrySet()) {
       try {
-        JavaFileObject firstClass = Iterables.getFirst(fileManager.list(
-            StandardLocation.CLASS_PATH, pkg.getKey(), Sets.newHashSet(Kind.CLASS), false), null);
+        JavaFileObject firstClass =
+            Iterables.getFirst(
+                fileManager.list(
+                    StandardLocation.CLASS_PATH, pkg.getKey(), Sets.newHashSet(Kind.CLASS), false),
+                null);
         if (firstClass == null) {
-          firstClass = Iterables.getFirst(fileManager.list(
-              StandardLocation.PLATFORM_CLASS_PATH, pkg.getKey(), Sets.newHashSet(Kind.CLASS),
-              false), null);
+          firstClass =
+              Iterables.getFirst(
+                  fileManager.list(
+                      StandardLocation.PLATFORM_CLASS_PATH,
+                      pkg.getKey(),
+                      Sets.newHashSet(Kind.CLASS),
+                      false),
+                  null);
         }
         if (firstClass != null) {
           firstClass.getCharContent(true);
         }
-        JavaFileObject firstSource = Iterables.getFirst(fileManager.list(
-            StandardLocation.SOURCE_PATH, pkg.getKey(), Sets.newHashSet(Kind.SOURCE), false), null);
+        JavaFileObject firstSource =
+            Iterables.getFirst(
+                fileManager.list(
+                    StandardLocation.SOURCE_PATH,
+                    pkg.getKey(),
+                    Sets.newHashSet(Kind.SOURCE),
+                    false),
+                null);
         if (firstSource != null) {
           firstSource.getCharContent(true);
         }
       } catch (IOException e) {
-        throw new ExtractionException(String.format(
-            "Unable to extract files used for on demand imports in {%s}",
-            Joiner.on(", ").join(pkg.getValue())), e, false);
+        throw new ExtractionException(
+            String.format(
+                "Unable to extract files used for on demand imports in {%s}",
+                Joiner.on(", ").join(pkg.getValue())),
+            e,
+            false);
       }
     }
   }
 
   /**
-   * Determines -sourcepath arguments to add to the compilation
-   * unit based on the package name. This is needed as the sharded analysis
-   * will need to resolve dependent source files. Also locates sources that
-   * do not follow the package == path convention and list them as explicit
-   * sources.
+   * Determines -sourcepath arguments to add to the compilation unit based on the package name. This
+   * is needed as the sharded analysis will need to resolve dependent source files. Also locates
+   * sources that do not follow the package == path convention and list them as explicit sources.
    */
   private void getAdditionalSourcePaths(
-          Iterable<? extends CompilationUnitTree> compilationUnits, AnalysisResults results) {
+      Iterable<? extends CompilationUnitTree> compilationUnits, AnalysisResults results) {
 
     for (CompilationUnitTree compilationUnit : compilationUnits) {
       ExpressionTree packageExpression = compilationUnit.getPackageName();
@@ -356,8 +388,7 @@ public class JavaCompilationUnitExtractor {
           // jars, we end up with a double named path.
           int index = path.lastIndexOf(packageSubDir);
           if (index >= 0) {
-            String root = ExtractorUtils.tryMakeRelative(rootDirectory,
-                path.substring(0, index));
+            String root = ExtractorUtils.tryMakeRelative(rootDirectory, path.substring(0, index));
             results.newSourcePath.add(root);
           }
         }
@@ -365,18 +396,47 @@ public class JavaCompilationUnitExtractor {
     }
   }
 
-  private void findRequiredFiles(UsageAsInputReportingFileManager fileManager,
-      Map<URI, String> sourceFiles, AnalysisResults results) throws ExtractionException {
+  private void findRequiredFiles(
+      UsageAsInputReportingFileManager fileManager,
+      Map<URI, String> sourceFiles,
+      AnalysisResults results)
+      throws ExtractionException {
     for (JavaFileObject fileObject : fileManager.getUsages()) {
       processRequiredInput(fileObject, fileManager, sourceFiles, results);
     }
   }
 
-  private void processRequiredInput(JavaFileObject requiredInput,
-      JavaFileManager fileManager, Map<URI, String> sourceFiles, AnalysisResults results)
+  private void processRequiredInput(
+      JavaFileObject requiredInput,
+      JavaFileManager fileManager,
+      Map<URI, String> sourceFiles,
+      AnalysisResults results)
       throws ExtractionException {
     URI uri = requiredInput.toUri();
+    String entryPath;
+    String jarPath = null;
     boolean isJarPath = false;
+
+    {
+      URLConnection conn;
+      URL url;
+      try {
+        url = uri.toURL();
+        conn = url.openConnection();
+      } catch (IOException e) {
+        throw new IOError(e);
+      }
+      if (conn instanceof JarURLConnection) {
+        isJarPath = true;
+        JarURLConnection jarConn = ((JarURLConnection) conn);
+        jarPath = jarConn.getJarFileURL().getFile().toString();
+        // jar entries don't have a leading '/', and we expect
+        // paths like "!JAR!/com/foo/Bar.class"
+        entryPath = "/" + jarConn.getEntryName();
+      } else {
+        entryPath = url.getFile().toString();
+      }
+    }
 
     if (uri.getScheme().equals(JAR_SCHEME)) {
       isJarPath = true;
@@ -389,13 +449,14 @@ public class JavaCompilationUnitExtractor {
       case SOURCE:
         break;
       default:
-        throw new IllegalStateException(String.format("Unsupported java file kind: '%s' for '%s'",
-            requiredInput.getKind().name(), uri));
+        throw new IllegalStateException(
+            String.format(
+                "Unsupported java file kind: '%s' for '%s'", requiredInput.getKind().name(), uri));
     }
 
     // If the file was part of the JDK we do not store it as the JDK is tied
     // to the analyzer we'll run on this information later on.
-    if (isJarPath && uri.toString().startsWith(jdkJar)) {
+    if (isJarPath && jarPath.startsWith(jdkJar)) {
       return;
     }
 
@@ -412,9 +473,7 @@ public class JavaCompilationUnitExtractor {
       // This is done so we do not need to download the entire jar file for each
       // file's compilation (e.g. instead of downloading 200MB we only download 60K
       // for analyzing the kythe java indexer).
-      int splitIndex = strippedPath.indexOf('!');
-      String rest = strippedPath.substring(splitIndex + 1);
-      switch(requiredInput.getKind()) {
+      switch (requiredInput.getKind()) {
         case CLASS:
           results.newClassPath.add(JAR_ROOT);
           break;
@@ -422,7 +481,7 @@ public class JavaCompilationUnitExtractor {
           results.newSourcePath.add(JAR_ROOT);
           break;
       }
-      strippedPath = JAR_ROOT + rest;
+      strippedPath = JAR_ROOT + entryPath;
     }
     if (!isJarPath && requiredInput.getKind() == Kind.CLASS) {
       // If the class file was on disk, we need to infer the correct classpath to add.
@@ -434,8 +493,8 @@ public class JavaCompilationUnitExtractor {
         binaryName = fileManager.inferBinaryName(StandardLocation.SOURCE_PATH, requiredInput);
       }
       if (binaryName == null) {
-        binaryName = fileManager.inferBinaryName(
-            StandardLocation.PLATFORM_CLASS_PATH, requiredInput);
+        binaryName =
+            fileManager.inferBinaryName(StandardLocation.PLATFORM_CLASS_PATH, requiredInput);
       }
       if (binaryName == null) {
         throw new ExtractionException(
@@ -448,8 +507,9 @@ public class JavaCompilationUnitExtractor {
       int cindex = strippedPath.indexOf(csubdir);
       if (cindex <= 0) {
         throw new ExtractionException(
-          String.format("unable to infer classpath for %s from %s, %s", strippedPath, csubdir,
-            binaryName), false);
+            String.format(
+                "unable to infer classpath for %s from %s, %s", strippedPath, csubdir, binaryName),
+            false);
       } else {
         results.newClassPath.add(strippedPath.substring(0, cindex));
       }
@@ -487,28 +547,32 @@ public class JavaCompilationUnitExtractor {
 
   private static class AnalysisResults {
     // Map from strippedPath to an input's relative path to the corpus root.
-    final Map<String, String> relativePaths = Maps.newLinkedHashMap();
+    final Map<String, String> relativePaths = new LinkedHashMap<>();
     // Map from strippedPath to an input's contents.
-    final Map<String, byte[]> fileContents = Maps.newLinkedHashMap();
+    final Map<String, byte[]> fileContents = new LinkedHashMap<>();
     // Map from strippedPath to an input's true source basename. This is usually only needed for
     // non-public top-level classes where their filename does not match the path derived from their
     // fully-qualified name.
-    final Map<String, String> sourceFileNames = Maps.newHashMap();
+    final Map<String, String> sourceFileNames = new HashMap<>();
 
     // We build a new sourcepath & classpath that contain the minimum set of paths
     // as well as the modified set of paths that are needed to analyze the single compilation unit.
     // This is done to speed up analysis.
-    final Set<String> newSourcePath = Sets.newHashSet();
-    final Set<String> newClassPath = Sets.newHashSet();
-    final List<String> explicitSources = Lists.newArrayList();
-    final Set<String> unusedJars = Sets.newHashSet();
+    final Set<String> newSourcePath = new LinkedHashSet<>();
+    final Set<String> newClassPath = new LinkedHashSet<>();
+    final List<String> explicitSources = new ArrayList<>();
+    final Set<String> unusedJars = new LinkedHashSet<>();
     boolean hasErrors = false;
   }
 
   private AnalysisResults runJavaAnalysisToExtractCompilationDetails(
-      Iterable<String> sources, Iterable<String> classpath, Iterable<String> sourcepath,
-      Iterable<String> processorpath, Iterable<String> processors, Iterable<String> options,
-      String outputPath) throws ExtractionException {
+      Iterable<String> sources,
+      Iterable<String> classpath,
+      Iterable<String> sourcepath,
+      Iterable<String> processorpath,
+      Iterable<String> processors,
+      Iterable<String> options)
+      throws ExtractionException {
 
     AnalysisResults results = new AnalysisResults();
 
@@ -517,7 +581,8 @@ public class JavaCompilationUnitExtractor {
     JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
     if (compiler == null) {
       // TODO(schroederc): provide link to further context
-      throw new IllegalStateException("Could not get system Java compiler; are you missing the JDK?");
+      throw new IllegalStateException(
+          "Could not get system Java compiler; are you missing the JDK?");
     }
 
     DiagnosticCollector<JavaFileObject> diagnosticsCollector =
@@ -533,70 +598,37 @@ public class JavaCompilationUnitExtractor {
 
     Iterable<? extends JavaFileObject> sourceFiles = fileManager.getJavaFileForSources(sources);
 
-    // We need to modify the options to the compiler to pass in -classpath and
-    // -sourcepath arguments.
-    List<String> completeOptions = Lists.newArrayList(options);
-
-    if (!hasEncodingOption(completeOptions)) {
-      completeOptions.add("-encoding");
-      completeOptions.add(Charsets.UTF_8.name());
-    }
-
-    String classPathJoined = Joiner.on(":").join(classpath);
-    String sourcePathJoined = Joiner.on(":").join(sourcepath);
-    if (!Strings.isNullOrEmpty(classPathJoined)) {
-      completeOptions.add("-cp");
-      completeOptions.add(classPathJoined);
-    }
-    if (!Strings.isNullOrEmpty(sourcePathJoined)) {
-      completeOptions.add("-sourcepath");
-      completeOptions.add(sourcePathJoined);
-    }
-
     // Generate class files in a temporary directory
     Path tempDir;
     try {
       tempDir = Files.createTempDirectory("javac_extractor");
     } catch (IOException ioe) {
-      throw new ExtractionException("Unable to create temporary .class output directory", ioe, true);
+      throw new ExtractionException(
+          "Unable to create temporary .class output directory", ioe, true);
     }
-    for (int i = 0; i < completeOptions.size(); i++) {
-      if ("-d".equals(completeOptions.get(i))) {
-        completeOptions.remove(i);
-        completeOptions.remove(i);
-      }
-    }
-    completeOptions.add("-d");
-    completeOptions.add(tempDir.toString());
+    List<String> completeOptions = completeCompilerOptions(options, classpath, sourcepath, tempDir);
 
     Iterable<? extends CompilationUnitTree> compilationUnits;
     Symtab syms;
     try {
       // Launch the java compiler with our modified settings and the filemanager wrapper
       CompilationTask task =
-          compiler.getTask(null, fileManager, diagnosticsCollector, completeOptions, null,
-              sourceFiles);
+          compiler.getTask(
+              null, fileManager, diagnosticsCollector, completeOptions, null, sourceFiles);
 
       List<Processor> procs = Lists.<Processor>newArrayList(new ProcessAnnotation(fileManager));
-      if (!Iterables.isEmpty(processors)) {
-        List<URL> urls = Lists.newArrayList();
-        for (String path : processorpath) {
-          try {
-            urls.add(new File(path).toURI().toURL());
-          } catch (MalformedURLException e) {
-            throw new ExtractionException("Bad processorpath entry", e, false);
-          }
+      ClassLoader loader = processingClassloader(classpath, processorpath);
+      for (String processor : processors) {
+        try {
+          procs.add(loader.loadClass(processor).asSubclass(Processor.class).newInstance());
+        } catch (ClassNotFoundException | IllegalAccessException | InstantiationException e) {
+          throw new ExtractionException("Bad processor entry", e, false);
         }
-        // TODO: Use a more restricted ClassLoader to prevent class path skew?
-        ClassLoader parent = getClass().getClassLoader();
-        ClassLoader loader = new URLClassLoader(urls.toArray(new URL[0]), parent);
-        for (String processor : processors) {
-          try {
-            procs.add(loader.loadClass(processor).asSubclass(Processor.class).newInstance());
-          } catch (ClassNotFoundException|IllegalAccessException|InstantiationException e) {
-            throw new ExtractionException("Bad processor entry", e, false);
-          }
-        }
+      }
+
+      // Add any processors registered in the META-INF/services configuration.
+      for (Processor proc : ServiceLoader.load(Processor.class, loader)) {
+        procs.add(proc);
       }
 
       JavacTask javacTask = (JavacTask) task;
@@ -612,7 +644,7 @@ public class JavaCompilationUnitExtractor {
       } catch (com.sun.tools.javac.util.Abort e) {
         // Type resolution issues, the diagnostics will give hints on what's going wrong.
         for (Diagnostic<? extends JavaFileObject> diagnostic :
-                 diagnosticsCollector.getDiagnostics()) {
+            diagnosticsCollector.getDiagnostics()) {
           if (diagnostic.getKind() == Diagnostic.Kind.ERROR) {
             logger.severefmt("Fatal error in compiler: %s", diagnostic.getMessage(Locale.ENGLISH));
           }
@@ -634,8 +666,9 @@ public class JavaCompilationUnitExtractor {
       if (diag.getKind() == Diagnostic.Kind.ERROR) {
         results.hasErrors = true;
         if (diag.getSource() != null) {
-          logger.severefmt("compiler error: %s(%d): %s", diag.getSource().getName(),
-              diag.getLineNumber(), diag.getMessage(Locale.ENGLISH));
+          logger.severefmt(
+              "compiler error: %s(%d): %s",
+              diag.getSource().getName(), diag.getLineNumber(), diag.getMessage(Locale.ENGLISH));
         } else {
           logger.severefmt("compiler error: %s", diag.getMessage(Locale.ENGLISH));
         }
@@ -658,25 +691,102 @@ public class JavaCompilationUnitExtractor {
     return results;
   }
 
+  /** Create the ClassLoader to use for annotation processors. */
+  private static ClassLoader processingClassloader(
+      Iterable<String> classpath, Iterable<String> processorpath) throws ExtractionException {
+    // If javac is run with -processor set and -processorpath *unset*, it will fall back to
+    // searching the regular classpath for annotation processors.
+    if (Iterables.isEmpty(processorpath)) {
+      processorpath = classpath;
+    }
+
+    List<URL> urls = new ArrayList<>();
+    for (String path : processorpath) {
+      try {
+        urls.add(new File(path).toURI().toURL());
+      } catch (MalformedURLException e) {
+        throw new ExtractionException("Bad processorpath entry", e, false);
+      }
+    }
+    ClassLoader parent = new MaskedClassLoader();
+    return new URLClassLoader(Iterables.toArray(urls, URL.class), parent);
+  }
+
+  /** Isolated classloader for annotation processors, to avoid skew with the ambient classpath. */
+  private static class MaskedClassLoader extends ClassLoader {
+    private MaskedClassLoader() {
+      // delegate only to the bootclasspath
+      super(null);
+    }
+
+    @Override
+    protected Class<?> findClass(String name) throws ClassNotFoundException {
+      if (name.startsWith("com.sun.source.") || name.startsWith("com.sun.tools.")) {
+        return JavaCompilationUnitExtractor.class.getClassLoader().loadClass(name);
+      }
+      throw new ClassNotFoundException(name);
+    }
+  }
+
+  /**
+   * Completes the given raw compiler options with the given classpath, sourcepath, and temporary
+   * destination directory. Only options supported by the Java compiler will be within the returned
+   * {@link List}.
+   */
+  private static List<String> completeCompilerOptions(
+      Iterable<String> rawOptions,
+      Iterable<String> classpath,
+      Iterable<String> sourcepath,
+      Path tempDestinationDir) {
+
+    List<String> completeOptions =
+        JavacOptionsUtils.ensureEncodingSet(
+            JavacOptionsUtils.removeUnsupportedOptions(Lists.newArrayList(rawOptions)),
+            Charsets.UTF_8);
+
+    // We need to modify the options to the compiler to pass in -classpath and
+    // -sourcepath arguments.
+    String classPathJoined = Joiner.on(":").join(classpath);
+    String sourcePathJoined = Joiner.on(":").join(sourcepath);
+    if (!Strings.isNullOrEmpty(classPathJoined)) {
+      completeOptions.add(Option.CP.getText());
+      completeOptions.add(classPathJoined);
+    }
+    if (!Strings.isNullOrEmpty(sourcePathJoined)) {
+      completeOptions.add(Option.SOURCEPATH.getText());
+      completeOptions.add(sourcePathJoined);
+    }
+
+    JavacOptionsUtils.removeOptions(completeOptions, EnumSet.of(Option.D));
+    completeOptions.add(Option.D.getText());
+    completeOptions.add(tempDestinationDir.toString());
+
+    return completeOptions;
+  }
+
   /** Returns a map from a classfile's {@link URI} to its sourcefile path's basename. */
   private static Map<URI, String> mapClassesToSources(Symtab syms) {
-    Map<URI, String> sourceBaseNames = Maps.newHashMap();
+    Map<URI, String> sourceBaseNames = new HashMap<>();
     for (ClassSymbol sym : syms.classes.values()) {
       if (sym.sourcefile != null && sym.classfile != null) {
-        String basename = Paths.get(sym.sourcefile.toUri().getPath()).getFileName().toString();
-        if (!basename.endsWith(".java")) {
-          logger.warning("Invalid sourcefile name: '" + basename + "'");
+        String path = sym.sourcefile.toUri().getPath();
+        if (path != null) {
+          String basename = Paths.get(path).getFileName().toString();
+          if (!basename.endsWith(".java")) {
+            logger.warning("Invalid sourcefile name: '" + basename + "'");
+          }
+          sourceBaseNames.put(sym.classfile.toUri(), basename);
         }
-        sourceBaseNames.put(sym.classfile.toUri(), basename);
       }
     }
     return sourceBaseNames;
   }
 
-  private void findUnusedDependencies(Iterable<String> classpaths,
+  private void findUnusedDependencies(
+      Iterable<String> classpaths,
       UsageAsInputReportingFileManager fileManager,
       AnalysisResults results) {
-    Set<String> jars = Sets.newHashSet();
+    Set<String> jars = new HashSet<>();
     for (String classpath : classpaths) {
       if (!classpath.endsWith(".jar")) {
         continue;
@@ -691,16 +801,12 @@ public class JavaCompilationUnitExtractor {
       // Javac uses the pattern of JAR:<jarfile-url>!<classfile> for class files inside jar files.
       String jar = uri.getRawSchemeSpecificPart().split("!")[0];
       uri = URI.create(jar);
-      String jarPath = ExtractorUtils.tryMakeRelative(rootDirectory,
-          uri.getRawSchemeSpecificPart());
+      String jarPath =
+          ExtractorUtils.tryMakeRelative(rootDirectory, uri.getRawSchemeSpecificPart());
       if (jars.contains(jarPath)) {
         jars.remove(jarPath);
       }
     }
     results.unusedJars.addAll(jars);
-  }
-
-  private boolean hasEncodingOption(List<String> options) {
-    return options.contains("-encoding");
   }
 }

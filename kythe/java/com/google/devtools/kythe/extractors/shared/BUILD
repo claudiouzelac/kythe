@@ -10,11 +10,11 @@ java_library(
         "IndexInfoUtils.java",
     ],
     deps = [
+        "//external:guava",
+        "//external:proto/protobuf_java",
         "//kythe/java/com/google/devtools/kythe/common",
         "//kythe/proto:analysis_proto_java",
         "//kythe/proto:storage_proto_java",
-        "//third_party/guava",
-        "//third_party/proto:protobuf_java",
     ],
 )
 
@@ -24,10 +24,10 @@ java_library(
         "FileVNames.java",
     ],
     deps = [
+        "//external:gson",
+        "//external:guava",
+        "//external:proto/protobuf_java",
+        "//external:re2j",
         "//kythe/proto:storage_proto_java",
-        "//third_party/gson",
-        "//third_party/guava",
-        "//third_party/proto:protobuf_java",
-        "//third_party/re2j",
     ],
 )

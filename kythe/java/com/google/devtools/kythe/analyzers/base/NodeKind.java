@@ -23,6 +23,7 @@ public enum NodeKind {
   ABS_VAR("absvar"),
   ANCHOR("anchor"),
   CONSTANT("constant"),
+  DOC("doc"),
   FILE("file"),
   FUNCTION("function"),
   INTERFACE("interface"),
@@ -40,11 +41,12 @@ public enum NodeKind {
   VARIABLE_LOCAL("variable", "local"),
   VARIABLE_PARAMETER("variable", "local/parameter"),
   VARIABLE_RESOURCE("variable", "local/resource");
-
   private final String kind, subkind;
+
   NodeKind(String kind) {
     this(kind, null);
   }
+
   NodeKind(String kind, String subkind) {
     this.kind = kind;
     this.subkind = subkind;

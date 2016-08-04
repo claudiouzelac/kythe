@@ -17,7 +17,6 @@
 package com.google.devtools.kythe.platform.java.filemanager;
 
 import com.google.devtools.kythe.platform.shared.FileDataProvider;
-
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -27,26 +26,25 @@ import java.io.Reader;
 import java.io.Writer;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.nio.charset.Charset;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Objects;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
-
 import javax.tools.FileObject;
 
-/**
- * A custom file object.
- */
+/** File object backed by a {@link Future}. */
+@com.sun.tools.javac.api.ClientCodeWrapper.Trusted
 public class CustomFileObject implements FileObject {
   protected final Path path;
   protected final String digest;
   protected final Future<byte[]> future;
 
-  protected final String encoding;
+  protected final Charset encoding;
 
-  public CustomFileObject(FileDataProvider contentProvider, String path, String digest,
-      String encoding) {
+  public CustomFileObject(
+      FileDataProvider contentProvider, String path, String digest, Charset encoding) {
     this.path = Paths.get(path);
     this.digest = digest;
     this.encoding = encoding;
@@ -125,6 +123,8 @@ public class CustomFileObject implements FileObject {
 
   @Override
   public boolean equals(Object other) {
+    // This implementation relies on the Trusted annotation on this class to opt out of using the
+    // WrappedJavaFileObject wrapper class.
     if (this == other) {
       return true;
     } else if (!(other instanceof CustomFileObject)) {

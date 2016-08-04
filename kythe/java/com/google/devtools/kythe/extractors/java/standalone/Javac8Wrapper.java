@@ -16,39 +16,38 @@
 
 package com.google.devtools.kythe.extractors.java.standalone;
 
-import com.google.common.collect.Lists;
-import com.google.common.collect.Sets;
 import com.google.devtools.kythe.extractors.java.JavaCompilationUnitExtractor;
 import com.google.devtools.kythe.extractors.shared.CompilationDescription;
-
 import com.sun.tools.javac.file.JavacFileManager;
-import com.sun.tools.javac.main.CommandLine;
-import com.sun.tools.javac.main.Main;
+import com.sun.tools.javac.main.Arguments;
 import com.sun.tools.javac.main.Option;
 import com.sun.tools.javac.util.Context;
-import com.sun.tools.javac.util.ListBuffer;
 import com.sun.tools.javac.util.Options;
-
+import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.List;
+import javax.tools.JavaFileObject;
 
-/**
- * A class that wraps javac to extract compilation information and write it to an index file.
- */
+/** A class that wraps javac to extract compilation information and write it to an index file. */
 public class Javac8Wrapper extends AbstractJavacWrapper {
   @Override
-  protected CompilationDescription processCompilation(String[] cleanedUpArguments,
-      JavaCompilationUnitExtractor javaCompilationUnitExtractor) throws Exception {
-    Main main = new Main("kythe_javac8");
-    Context context = new Context();
-    JavacFileManager.preRegister(context);
-    Options options = Options.instance(context);
-    main.setOptions(options);
-    main.filenames = Sets.newHashSet();
-    main.classnames = new ListBuffer<String>();
+  protected CompilationDescription processCompilation(
+      String[] arguments, JavaCompilationUnitExtractor javaCompilationUnitExtractor)
+      throws Exception {
 
     // Use javac's argument parser to get the list of source files
-    List<String> sources = getSourceList(main.processArgs(CommandLine.parse(cleanedUpArguments)));
+    Context context = new Context();
+
+    JavacFileManager fileManager = new JavacFileManager(context, true, null);
+    Arguments args = Arguments.instance(context);
+    args.init("kythe_javac", arguments);
+    fileManager.handleOptions(args.getDeferredFileManagerOptions());
+    Options options = Options.instance(context);
+
+    List<String> sources = new ArrayList<>();
+    for (JavaFileObject fo : args.getFileObjects()) {
+      sources.add(fo.getName());
+    }
 
     // Retrieve the list of class paths provided by the -classpath argument.
     List<String> classPaths = splitPaths(options.get(Option.CLASSPATH));
@@ -60,14 +59,15 @@ public class Javac8Wrapper extends AbstractJavacWrapper {
     List<String> processorPaths = splitPaths(options.get(Option.PROCESSORPATH));
 
     // Retrieve the list of processors provided by the -processor argument.
-    List<String> processors = splitPaths(options.get(Option.PROCESSOR));
+    List<String> processors = splitCSV(options.get(Option.PROCESSOR));
 
-    EnumSet<Option> claimed = EnumSet.of(
-        Option.CLASSPATH, Option.SOURCEPATH,
-        Option.PROCESSORPATH, Option.PROCESSOR);
+    EnumSet<Option> claimed =
+        EnumSet.of(
+            Option.CLASSPATH, Option.SOURCEPATH,
+            Option.PROCESSORPATH, Option.PROCESSOR);
 
     // Retrieve all other javac options.
-    List<String> completeOptions = Lists.newArrayList();
+    List<String> completeOptions = new ArrayList<>();
     for (Option opt : Option.values()) {
       if (!claimed.contains(opt)) {
         String value = options.get(opt);
@@ -92,8 +92,15 @@ public class Javac8Wrapper extends AbstractJavacWrapper {
 
     String analysisTarget =
         readEnvironmentVariable("KYTHE_ANALYSIS_TARGET", createTargetFromSourceFiles(sources));
-    return javaCompilationUnitExtractor.extract(analysisTarget, sources,
-        classPaths, sourcePaths, processorPaths, processors, completeOptions, outputDirectory);
+    return javaCompilationUnitExtractor.extract(
+        analysisTarget,
+        sources,
+        classPaths,
+        sourcePaths,
+        processorPaths,
+        processors,
+        completeOptions,
+        outputDirectory);
   }
 
   @Override

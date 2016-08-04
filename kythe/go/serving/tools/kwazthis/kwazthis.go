@@ -43,7 +43,6 @@ import (
 	"strings"
 
 	"kythe.io/kythe/go/platform/vfs"
-	"kythe.io/kythe/go/services/search"
 	"kythe.io/kythe/go/services/xrefs"
 	"kythe.io/kythe/go/serving/api"
 	"kythe.io/kythe/go/util/flagutil"
@@ -87,11 +86,9 @@ var (
 
 	dirtyBuffer = flag.String("dirty_buffer", "", "Path to file with dirty buffer contents (optional)")
 
-	path      = flag.String("path", "", "Path of file (optional if --signature is given)")
-	signature = flag.String("signature", "", "Signature of file VName (optional if --path is given)")
-	corpus    = flag.String("corpus", "", "Corpus of file VName (optional)")
-	root      = flag.String("root", "", "Root of file VName (optional)")
-	language  = flag.String("language", "", "Language of file VName (optional)")
+	path   = flag.String("path", "", "Path of file")
+	corpus = flag.String("corpus", "", "Corpus of file VName")
+	root   = flag.String("root", "", "Root of file VName")
 
 	offset       = flag.Int("offset", -1, "Non-negative offset in file to list references (mutually exclusive with --line and --column)")
 	lineNumber   = flag.Int("line", -1, "1-based line number in file to list references (must be given with --column)")
@@ -100,14 +97,7 @@ var (
 	skipDefinitions = flag.Bool("skip_defs", false, "Skip listing definitions for each node")
 )
 
-var (
-	xs  xrefs.Service
-	idx search.Service
-
-	fileFacts = []*spb.SearchRequest_Fact{
-		{Name: schema.NodeKindFact, Value: []byte(schema.FileKind)},
-	}
-)
+var xs xrefs.Service
 
 type definition struct {
 	File  *spb.VName `json:"file"`
@@ -145,12 +135,12 @@ func main() {
 		flagutil.UsageErrorf("unknown non-flag argument(s): %v", flag.Args())
 	} else if *offset < 0 && (*lineNumber < 0 || *columnOffset < 0) {
 		flagutil.UsageError("non-negative --offset (or --line and --column) required")
-	} else if *signature == "" && *path == "" {
-		flagutil.UsageError("must provide at least --path or --signature")
+	} else if *path == "" {
+		flagutil.UsageError("must provide --path")
 	}
 
 	defer (*apiFlag).Close()
-	xs, idx = *apiFlag, *apiFlag
+	xs = *apiFlag
 
 	relPath := *path
 	if *localRepoRoot != "NONE" {
@@ -175,111 +165,91 @@ func main() {
 			}
 		}
 	}
-	partialFile := &spb.VName{
-		Signature: *signature,
-		Corpus:    *corpus,
-		Root:      *root,
-		Path:      relPath,
-		Language:  *language,
-	}
-	reply, err := idx.Search(ctx, &spb.SearchRequest{
-		Partial: partialFile,
-		Fact:    fileFacts,
-	})
-	if err != nil {
-		log.Fatalf("Error locating file {%v}: %v", partialFile, err)
-	}
-	if len(reply.Ticket) == 0 {
-		log.Fatalf("Could not locate file {%v}", partialFile)
-	} else if len(reply.Ticket) > 1 {
-		log.Fatalf("Ambiguous file {%v}; multiple results: %v", partialFile, reply.Ticket)
-	}
 
-	fileTicket := reply.Ticket[0]
-	text := readDirtyBuffer(ctx)
+	fileTicket := (&kytheuri.URI{Corpus: *corpus, Root: *root, Path: relPath}).String()
+	point := &xpb.Location_Point{
+		ByteOffset:   int32(*offset),
+		LineNumber:   int32(*lineNumber),
+		ColumnOffset: int32(*columnOffset),
+	}
+	dirtyBuffer := readDirtyBuffer(ctx)
 	decor, err := xs.Decorations(ctx, &xpb.DecorationsRequest{
-		// TODO(schroederc): limit Location to a SPAN around *offset
-		Location:    &xpb.Location{Ticket: fileTicket},
+		Location: &xpb.Location{
+			Ticket: fileTicket,
+			Kind:   xpb.Location_SPAN,
+			Start:  point,
+			End:    point,
+		},
+		SpanKind:    xpb.DecorationsRequest_AROUND_SPAN,
 		References:  true,
 		SourceText:  true,
-		DirtyBuffer: text,
+		DirtyBuffer: dirtyBuffer,
 		Filter: []string{
 			schema.NodeKindFact,
 			schema.SubkindFact,
-			schema.AnchorLocFilter, // TODO(schroederc): remove once backwards-compatibility fix below is removed
 		},
 	})
 	if err != nil {
 		log.Fatal(err)
 	}
-	if text == nil {
-		text = decor.SourceText
-	}
-	nodes := xrefs.NodesMap(decor.Node)
-
-	// Normalize point within source text
-	point := normalizedPoint(text)
+	nodes := xrefs.NodesMap(decor.Nodes)
 
 	en := json.NewEncoder(os.Stdout)
 	for _, ref := range decor.Reference {
-		var start, end int
-		if ref.AnchorStart == nil || ref.AnchorEnd == nil {
-			// TODO(schroederc): remove this backwards-compatibility fix
-			start, end = parseAnchorSpan(nodes[ref.SourceTicket])
+		start, end := int(ref.AnchorStart.ByteOffset), int(ref.AnchorEnd.ByteOffset)
+
+		var r reference
+		r.Span.Start = start
+		r.Span.End = end
+		if len(dirtyBuffer) > 0 {
+			r.Span.Text = string(dirtyBuffer[start:end])
+		} // TODO(schroederc): add option to get anchor text from DecorationsReply
+		r.Kind = strings.TrimPrefix(ref.Kind, schema.EdgePrefix)
+		r.Node.Ticket = ref.TargetTicket
+
+		node := nodes[ref.TargetTicket]
+		r.Node.Kind = string(node[schema.NodeKindFact])
+		r.Node.Subkind = string(node[schema.SubkindFact])
+
+		// TODO(schroederc): use CrossReferences method
+		if eReply, err := xrefs.AllEdges(ctx, xs, &xpb.EdgesRequest{
+			Ticket: []string{ref.TargetTicket},
+			Kind:   []string{schema.NamedEdge, schema.TypedEdge, definedAtEdge, definedBindingAtEdge},
+		}); err != nil {
+			log.Printf("WARNING: error getting edges for %q: %v", ref.TargetTicket, err)
 		} else {
-			start, end = int(ref.AnchorStart.ByteOffset), int(ref.AnchorEnd.ByteOffset)
+			edges := xrefs.EdgesMap(eReply.EdgeSets)[ref.TargetTicket]
+			for name := range edges[schema.NamedEdge] {
+				if uri, err := kytheuri.Parse(name); err != nil {
+					log.Printf("WARNING: named node ticket (%q) could not be parsed: %v", name, err)
+				} else {
+					r.Node.Names = append(r.Node.Names, uri.Signature)
+				}
+			}
+
+			for typed := range edges[schema.TypedEdge] {
+				r.Node.Typed = typed
+				break
+			}
+
+			if !*skipDefinitions {
+				defs := edges[definedAtEdge]
+				if len(defs) == 0 {
+					defs = edges[definedBindingAtEdge]
+				}
+				for defAnchor := range defs {
+					def, err := completeDefinition(defAnchor)
+					if err != nil {
+						log.Printf("WARNING: failed to complete definition for %q: %v", defAnchor, err)
+					} else {
+						r.Node.Definitions = append(r.Node.Definitions, def)
+					}
+				}
+			}
 		}
 
-		if start <= point && point < end {
-			var r reference
-			r.Span.Start = start
-			r.Span.End = end
-			r.Span.Text = string(text[start:end])
-			r.Kind = strings.TrimPrefix(ref.Kind, schema.EdgePrefix)
-			r.Node.Ticket = ref.TargetTicket
-
-			node := nodes[ref.TargetTicket]
-			r.Node.Kind = string(node[schema.NodeKindFact])
-			r.Node.Subkind = string(node[schema.SubkindFact])
-
-			if eReply, err := xrefs.AllEdges(ctx, xs, &xpb.EdgesRequest{
-				Ticket: []string{ref.TargetTicket},
-				Kind:   []string{schema.NamedEdge, schema.TypedEdge, definedAtEdge, definedBindingAtEdge},
-			}); err != nil {
-				log.Printf("WARNING: error getting edges for %q: %v", ref.TargetTicket, err)
-			} else {
-				edges := xrefs.EdgesMap(eReply.EdgeSet)[ref.TargetTicket]
-				for _, name := range edges[schema.NamedEdge] {
-					if uri, err := kytheuri.Parse(name); err != nil {
-						log.Printf("WARNING: named node ticket (%q) could not be parsed: %v", name, err)
-					} else {
-						r.Node.Names = append(r.Node.Names, uri.Signature)
-					}
-				}
-
-				if typed := edges[schema.TypedEdge]; len(typed) > 0 {
-					r.Node.Typed = typed[0]
-				}
-
-				if !*skipDefinitions {
-					defs := edges[definedAtEdge]
-					if len(defs) == 0 {
-						defs = edges[definedBindingAtEdge]
-					}
-					for _, defAnchor := range defs {
-						def, err := completeDefinition(defAnchor)
-						if err != nil {
-							log.Printf("WARNING: failed to complete definition for %q: %v", defAnchor, err)
-						} else {
-							r.Node.Definitions = append(r.Node.Definitions, def)
-						}
-					}
-				}
-			}
-
-			if err := en.Encode(r); err != nil {
-				log.Fatal(err)
-			}
+		if err := en.Encode(r); err != nil {
+			log.Fatal(err)
 		}
 	}
 }
@@ -294,9 +264,9 @@ func completeDefinition(defAnchor string) (*definition, error) {
 		return nil, err
 	}
 
-	parentNodes := xrefs.NodesMap(parentReply.Node)
+	parentNodes := xrefs.NodesMap(parentReply.Nodes)
 	var files []string
-	for _, parent := range xrefs.EdgesMap(parentReply.EdgeSet)[defAnchor][schema.ChildOfEdge] {
+	for parent := range xrefs.EdgesMap(parentReply.EdgeSets)[defAnchor][schema.ChildOfEdge] {
 		if string(parentNodes[parent][schema.NodeKindFact]) == schema.FileKind {
 			files = append(files, parent)
 		}
@@ -355,20 +325,4 @@ func findKytheRoot(dir string) string {
 		dir = filepath.Dir(dir)
 	}
 	return ""
-}
-
-func normalizedPoint(text []byte) int {
-	p := xrefs.NewNormalizer(text).Point(&xpb.Location_Point{
-		ByteOffset:   max(*offset, 0),
-		LineNumber:   max(*lineNumber, 0),
-		ColumnOffset: max(*columnOffset, 0),
-	})
-	return int(p.ByteOffset)
-}
-
-func max(a, b int) int32 {
-	if a > b {
-		return int32(a)
-	}
-	return int32(b)
 }

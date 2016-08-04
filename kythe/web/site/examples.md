@@ -15,8 +15,8 @@ TODO(schroederc):
 {% endcomment %}
 
 This document assumes that the latest release archive from
-https://github.com/google/kythe/releases has been unpacked into /opt/kythe/.
-See /opt/kythe/README for more information.
+[https://github.com/google/kythe/releases](https://github.com/google/kythe/releases)
+has been unpacked into /opt/kythe/.  See /opt/kythe/README for more information.
 
 ## Extracting Compilations
 
@@ -67,7 +67,7 @@ find -L bazel-out -name '*.kindex'
 {% endhighlight %}
 
 The provided utility script,
-[kythe/extractors/bazel/extract.sh]({{site.data.development.source_browser}}/kythe/extractors/bazel/extract.sh),
+[https://github.com/google/kythe/blob/master/kythe/extractors/bazel/extract.sh]({{site.data.development.source_browser}}/kythe/extractors/bazel/extract.sh),
 does a full extraction using Bazel and then moves the compilations into the
 directory structure used by the
 [google/kythe]({{site.data.development.source_browser}}/kythe/release/kythe.sh)
@@ -100,7 +100,7 @@ java -jar /opt/kythe/indexers/java_indexer.jar \
 # java -jar /opt/kythe/indexers/java_indexer.jar --index_path=<root> <unit-hash> > entries
 java -jar /opt/kythe/indexers/java_indexer.jar \
   --index_pack=$PWD/.kythe_indexpack b3759d74b6ee8ba97312cf8b1b47c4263504a56ca9ab63e8f3af98298ccf9fd6 > entries
-# NOTE: http://kythe.io/phabricator/T40 -- the Java indexer should not be run in
+# NOTE: https://kythe.io/phabricator/T40 -- the Java indexer should not be run in
 #       the KYTHE_ROOT_DIRECTORY used during extraction
 
 # View indexer's output entry stream as JSON
@@ -135,15 +135,15 @@ docker run --rm \
 
 ## Using Cayley to explore a GraphStore
 
+Install Cayley if necessary:
+[https://github.com/google/cayley/releases](https://github.com/google/cayley/releases)
+
 {% highlight bash %}
 # Convert GraphStore to nquads format
 bazel run //kythe/go/storage/tools:triples -- --graphstore /path/to/graphstore | \
   gzip >kythe.nq.gz
 
-# Install Cayley (if necessary) (or https://github.com/google/cayley/releases)
-go get -u github.com/google/cayley
-
-$GOPATH/bin/cayley repl --dbpath kythe.nq.gz # or $GOPATH/bin/cayley http --dbpath kythe.nq.gz
+cayley repl --dbpath kythe.nq.gz # or cayley http --dbpath kythe.nq.gz
 {% endhighlight %}
 
     // Get all file nodes

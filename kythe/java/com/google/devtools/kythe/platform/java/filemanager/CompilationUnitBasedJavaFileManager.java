@@ -22,19 +22,19 @@ import com.google.devtools.kythe.proto.Analysis.CompilationUnit;
 import com.google.devtools.kythe.proto.Java.JavaDetails;
 import com.google.protobuf.Any;
 import com.google.protobuf.InvalidProtocolBufferException;
-
+import java.nio.charset.Charset;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
-
 import javax.tools.StandardJavaFileManager;
 import javax.tools.StandardLocation;
 
 /**
  * Makes it easier for our analysis to provide files in different ways than on the local file system
- * e.g. from datastores or .index files. All users of this class have to do is provide a
- * {@link FileDataProvider} that will feed the actual content in as a future.
+ * e.g. from datastores or .index files. All users of this class have to do is provide a {@link
+ * FileDataProvider} that will feed the actual content in as a future.
  */
+@com.sun.tools.javac.api.ClientCodeWrapper.Trusted
 public class CompilationUnitBasedJavaFileManager extends JavaFileStoreBasedFileManager {
 
   /**
@@ -49,8 +49,11 @@ public class CompilationUnitBasedJavaFileManager extends JavaFileStoreBasedFileM
    */
   private final Set<String> sourcepath = new HashSet<>();
 
-  public CompilationUnitBasedJavaFileManager(FileDataProvider contentProvider,
-      CompilationUnit unit, StandardJavaFileManager fileManager, String encoding) {
+  public CompilationUnitBasedJavaFileManager(
+      FileDataProvider contentProvider,
+      CompilationUnit unit,
+      StandardJavaFileManager fileManager,
+      Charset encoding) {
     super(new CompilationUnitBasedJavaFileStore(unit, contentProvider, encoding), fileManager);
 
     // TODO(schroederc): determine if we want to keep around legacy argument parsing support
@@ -81,11 +84,11 @@ public class CompilationUnitBasedJavaFileManager extends JavaFileStoreBasedFileM
   private static Set<String> getPathSet(List<String> options, String optName) {
     for (int i = 0; i < options.size(); i++) {
       if (options.get(i).equals(optName)) {
-        if (i+1 >= options.size()) {
+        if (i + 1 >= options.size()) {
           throw new IllegalArgumentException("Malformed " + optName + " argument");
         }
         Set<String> paths = new HashSet<>();
-        for (String path : options.get(i+1).split(":")) {
+        for (String path : options.get(i + 1).split(":")) {
           paths.add(path);
         }
         return paths;
@@ -100,8 +103,10 @@ public class CompilationUnitBasedJavaFileManager extends JavaFileStoreBasedFileM
         try {
           return JavaDetails.parseFrom(details.getValue());
         } catch (InvalidProtocolBufferException ipbe) {
-          System.err.println("WARNING: "
-              + "CompilationUnit contains JavaDetails that could not be parsed: " + ipbe);
+          System.err.println(
+              "WARNING: "
+                  + "CompilationUnit contains JavaDetails that could not be parsed: "
+                  + ipbe);
         }
       }
     }

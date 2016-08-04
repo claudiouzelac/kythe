@@ -1,6 +1,6 @@
 package(default_visibility = ["//kythe:default_visibility"])
 
-load("/tools/build_rules/lexyacc", "genlex", "genyacc")
+load("//tools:build_rules/lexyacc.bzl", "genlex", "genyacc")
 
 genyacc(
     name = "parser",
@@ -22,17 +22,20 @@ cc_library(
         ":parser",
     ],
     hdrs = [
+        "assertion_ast.h",
+        "assertions.h",
+        "location.hh",
+        "pretty_printer.h",
+        "stack.hh",
         ":parser",
     ],
     copts = [
+        "-Wno-non-virtual-dtor",
         "-Wno-deprecated-register",
         "-Wno-implicit-fallthrough",
     ],
-    includes = [
-        ".",
-    ],
     deps = [
-        "//third_party/googlelog:glog",
+        "//external:glog",
     ],
 )
 
@@ -40,6 +43,7 @@ cc_library(
     name = "lib",
     srcs = [
         "assertions.cc",
+        "parser.yy.hh",
         "pretty_printer.cc",
         "verifier.cc",
     ],
@@ -56,10 +60,10 @@ cc_library(
     ],
     deps = [
         ":lexparse",
+        "//external:gflags",
+        "//external:glog",
+        "//external:proto/protobuf",
         "//kythe/proto:storage_proto_cc",
-        "//third_party/googleflags:gflags",
-        "//third_party/googlelog:glog",
-        "//third_party/proto:protobuf",
     ],
 )
 
@@ -75,10 +79,10 @@ cc_library(
     ],
     deps = [
         ":lib",
+        "//external:gflags",
+        "//external:glog",
+        "//external:proto/protobuf",
         "//kythe/proto:storage_proto_cc",
-        "//third_party/googleflags:gflags",
-        "//third_party/googlelog:glog",
-        "//third_party/proto:protobuf",
     ],
 )
 
@@ -105,15 +109,16 @@ cc_library(
     ],
     deps = [
         ":lib",
+        "//external:glog",
+        "//external:googletest",
+        "//external:proto/protobuf",
         "//kythe/proto:storage_proto_cc",
-        "//third_party/googlelog:glog",
-        "//third_party/googletest",
-        "//third_party/proto:protobuf",
     ],
 )
 
 cc_test(
     name = "test",
+    size = "small",
     deps = [
         ":testlib",
     ],

@@ -15,22 +15,25 @@
 # limitations under the License.
 
 # This script checks that extract_compilation_database.sh works on a simple
-# compilation database. It should be run from the Kythe root.
-BASE_DIR="$TEST_SRCDIR/kythe/extractors/cmake"
+# compilation database.
+BASE_DIR="$PWD/kythe/extractors/cmake"
 OUT_DIR="$TEST_TMPDIR"
 EXTRACT="${BASE_DIR}/extract_compilation_database.sh"
-PF_SUFFIX=$(if [[ $(uname) == 'Darwin' ]]; then echo '.Darwin'; fi)
-EXPECTED_INDEX="2cd4afa6aba0e40df0a4de8a6c8f9952790abf9161e2436a9a58498bce5d673f.kindex"
 EXPECTED_FILE_HASH="deac66ccb79f6d31c0fa7d358de48e083c15c02ff50ec1ebd4b64314b9e6e196"
-KINDEX_TOOL="kythe/cxx/tools/kindex_tool"
-rm -f "${OUT_DIR}/*.kindex*"
-KYTHE_CORPUS=test_corpus KYTHE_ROOT_DIRECTORY="${BASE_DIR}/testdata" \
+KINDEX_TOOL="$PWD/kythe/cxx/tools/kindex_tool"
+export KYTHE_EXTRACTOR="$PWD/kythe/cxx/extractor/cxx_extractor"
+export JQ="$PWD/third_party/jq/jq"
+cd "${BASE_DIR}/testdata"
+KYTHE_CORPUS=test_corpus KYTHE_ROOT_DIRECTORY="${BASE_DIR}" \
     KYTHE_OUTPUT_DIRECTORY="${OUT_DIR}" \
     "${EXTRACT}" "${BASE_DIR}/testdata/compilation_database.json"
-"${KINDEX_TOOL}" -suppress_details -explode "${OUT_DIR}/${EXPECTED_INDEX}"
-sed "s:BASE_DIR:${BASE_DIR}:g" "${BASE_DIR}/testdata/expected.unit${PF_SUFFIX}" \
-    > "${OUT_DIR}/expected.unit"
-sed "s:BASE_DIR:${BASE_DIR}:g" "${BASE_DIR}/testdata/expected.file" \
-    > "${OUT_DIR}/expected.file"
-diff "${OUT_DIR}/expected.unit" "${OUT_DIR}/${EXPECTED_INDEX}_UNIT"
-diff "${OUT_DIR}/expected.file" "${OUT_DIR}/${EXPECTED_INDEX}_${EXPECTED_FILE_HASH}"
+[[ $(ls -1 "${OUT_DIR}"/*.kindex | wc -l) -eq 1 ]]
+INDEX_PATH=$(ls -1 "${OUT_DIR}"/*.kindex)
+"${KINDEX_TOOL}" -canonicalize_hashes -suppress_details -explode \
+    "${INDEX_PATH}"
+sed "s|signature: \"cu.*\"|signature: \"\"|" "${INDEX_PATH}_UNIT" > \
+    "${INDEX_PATH}_UNIT_NS"
+sed "s:TEST_CWD:${PWD}/:
+s:TEST_EXTRACTOR:${KYTHE_EXTRACTOR}:" "${BASE_DIR}/testdata/expected.unit" | \
+    diff - "${INDEX_PATH}_UNIT_NS"
+diff "${BASE_DIR}/testdata/expected.file" "${INDEX_PATH}_${EXPECTED_FILE_HASH}"

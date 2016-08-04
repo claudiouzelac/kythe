@@ -19,18 +19,18 @@ public class Files {
 
   //- @CONSTANT defines/binding ConstantMember
   public static final int CONSTANT = 42;
+
+  // Ensure this private member does not affect the class node across compilations.
+  private int PRIVATE_MEMBER = -42;
 }
 //- Anchor childof File =
-//-   vname(_,"kythe","","kythe/javatests/com/google/devtools/kythe/analyzers/java/testdata/pkg/Files.java","java")
-//- FilesClass childof File
+//-   vname("","kythe","","kythe/javatests/com/google/devtools/kythe/analyzers/java/testdata/pkg/Files.java","")
 
 //- File.node/kind file
 //- File.text/encoding "UTF-8"
 
 //- @OtherDecl defines/binding ODecl
-//- ODecl childof File
 enum OtherDecl {}
 
 //- @Inter defines/binding Inter
-//- Inter childof File
 interface Inter {}

@@ -18,26 +18,23 @@ package com.google.devtools.kythe.platform.java.filemanager;
 
 import com.google.devtools.kythe.platform.shared.FileDataProvider;
 import com.google.devtools.kythe.proto.Analysis.CompilationUnit;
-
+import java.nio.charset.Charset;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Set;
-
 import javax.tools.JavaFileObject.Kind;
 
-/**
- * An implementation of {@link JavaFileStore} based on data from a {@link CompilationUnit}.
- */
+/** An implementation of {@link JavaFileStore} based on data from a {@link CompilationUnit}. */
 public class CompilationUnitBasedJavaFileStore implements JavaFileStore {
   private final CompilationUnitFileTree fileTree;
   private FileDataProvider contentProvider;
-  private String encoding;
+  private Charset encoding;
 
-  public CompilationUnitBasedJavaFileStore(CompilationUnit unit,
-      FileDataProvider contentProvider, String encoding) {
+  public CompilationUnitBasedJavaFileStore(
+      CompilationUnit unit, FileDataProvider contentProvider, Charset encoding) {
     this.contentProvider = contentProvider;
     this.encoding = encoding;
 
@@ -53,12 +50,8 @@ public class CompilationUnitBasedJavaFileStore implements JavaFileStore {
       String dirToLookIn = join(prefix, dirname);
       String digest = fileTree.lookup(dirToLookIn, basename);
       if (digest != null) {
-        return new CustomJavaFileObject(contentProvider,
-            join(prefix, file.toString()),
-            digest,
-            className,
-            kind,
-            encoding);
+        return new CustomJavaFileObject(
+            contentProvider, join(prefix, file.toString()), digest, className, kind, encoding);
       }
     }
     return null;
@@ -80,8 +73,8 @@ public class CompilationUnitBasedJavaFileStore implements JavaFileStore {
       String dirToLookIn = Paths.get(prefix, packagePath).toString();
       String digest = fileTree.lookup(dirToLookIn, relativeName);
       if (digest != null) {
-        return new CustomFileObject(contentProvider,
-            join(prefix, packagePath, relativeName), digest, encoding);
+        return new CustomFileObject(
+            contentProvider, join(prefix, packagePath, relativeName), digest, encoding);
       }
     }
     return null;
@@ -94,8 +87,8 @@ public class CompilationUnitBasedJavaFileStore implements JavaFileStore {
    * {@code packageName} and ignores the sub-packages.
    */
   @Override
-  public Set<CustomJavaFileObject> list(String packageName, Set<Kind> kinds,
-      Set<String> pathPrefixes, boolean recurse) {
+  public Set<CustomJavaFileObject> list(
+      String packageName, Set<Kind> kinds, Set<String> pathPrefixes, boolean recurse) {
     Set<CustomJavaFileObject> matchingFiles = new HashSet<>();
     if (pathPrefixes == null) {
       return matchingFiles;
@@ -111,11 +104,9 @@ public class CompilationUnitBasedJavaFileStore implements JavaFileStore {
     return matchingFiles;
   }
 
-  /**
-   * Uses the map built from the required inputs to build a list of files per directory.
-   */
-  private Set<CustomJavaFileObject> getFiles(String dirToLookIn, Map<String, String> entries,
-      Set<Kind> kinds, String packageName) {
+  /** Uses the map built from the required inputs to build a list of files per directory. */
+  private Set<CustomJavaFileObject> getFiles(
+      String dirToLookIn, Map<String, String> entries, Set<Kind> kinds, String packageName) {
     Set<CustomJavaFileObject> files = new HashSet<>();
     for (Entry<String, String> entry : entries.entrySet()) {
       String fileName = entry.getKey();
@@ -123,12 +114,14 @@ public class CompilationUnitBasedJavaFileStore implements JavaFileStore {
         if (fileName.endsWith(kind.extension)) {
           int lastDot = fileName.lastIndexOf('.');
           String clsName = packageName + "." + fileName.substring(0, lastDot);
-          files.add(new CustomJavaFileObject(contentProvider,
-              join(dirToLookIn, entry.getKey()),
-              entry.getValue(),
-              clsName,
-              kind,
-              encoding));
+          files.add(
+              new CustomJavaFileObject(
+                  contentProvider,
+                  join(dirToLookIn, entry.getKey()),
+                  entry.getValue(),
+                  clsName,
+                  kind,
+                  encoding));
           break;
         }
       }

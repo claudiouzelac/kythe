@@ -19,12 +19,11 @@ package com.google.devtools.kythe.extractors.shared;
 import com.google.common.collect.Sets;
 import com.google.devtools.kythe.proto.Analysis.CompilationUnit;
 import com.google.devtools.kythe.proto.Analysis.FileData;
-
 import java.util.Objects;
 
 /**
- * Contains all data to completely describe a compilation.  Includes compilation
- * metadata and all required input files.
+ * Contains all data to completely describe a compilation. Includes compilation metadata and all
+ * required input files.
  */
 public class CompilationDescription {
   private final CompilationUnit compilationUnit;
@@ -54,8 +53,8 @@ public class CompilationDescription {
       return true;
     } else if (o instanceof CompilationDescription) {
       CompilationDescription oDesc = (CompilationDescription) o;
-      return Objects.equals(this.compilationUnit, oDesc.compilationUnit) &&
-          Sets.newHashSet(this.fileContents).equals(Sets.newHashSet(oDesc.fileContents));
+      return Objects.equals(this.compilationUnit, oDesc.compilationUnit)
+          && Sets.newHashSet(this.fileContents).equals(Sets.newHashSet(oDesc.fileContents));
     }
     return false;
   }

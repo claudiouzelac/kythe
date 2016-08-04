@@ -19,7 +19,6 @@ package com.google.devtools.kythe.extractors.java;
 import com.google.common.base.Function;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
-
 import java.io.IOException;
 import java.net.URI;
 import java.util.ArrayList;
@@ -28,7 +27,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-
 import javax.tools.FileObject;
 import javax.tools.ForwardingJavaFileManager;
 import javax.tools.JavaFileObject;
@@ -36,11 +34,11 @@ import javax.tools.JavaFileObject.Kind;
 import javax.tools.StandardJavaFileManager;
 
 /**
- * Wraps the StandardJavaFileManager to track which .java and .class files
- * Javac touches for a given compilation.
+ * Wraps the StandardJavaFileManager to track which .java and .class files Javac touches for a given
+ * compilation.
  */
-class UsageAsInputReportingFileManager
-    extends ForwardingJavaFileManager<StandardJavaFileManager> {
+@com.sun.tools.javac.api.ClientCodeWrapper.Trusted
+class UsageAsInputReportingFileManager extends ForwardingJavaFileManager<StandardJavaFileManager> {
 
   private final Map<URI, InputUsageRecord> inputUsageRecords = new HashMap<>();
 
@@ -48,9 +46,7 @@ class UsageAsInputReportingFileManager
     super(fileManager);
   }
 
-  /**
-   * Returns collection of JavaFileObjects that Javac read the contents of.
-   */
+  /** Returns collection of JavaFileObjects that Javac read the contents of. */
   public Collection<JavaFileObject> getUsages() {
     Collection<JavaFileObject> result = new ArrayList<>();
     for (InputUsageRecord usageRecord : inputUsageRecords.values()) {
@@ -67,12 +63,11 @@ class UsageAsInputReportingFileManager
   }
 
   @Override
-  public Iterable<JavaFileObject> list(Location location,
-                                       String packageName,
-                                       Set<Kind> kinds,
-                                       boolean recurse) throws IOException {
-    return Iterables.transform(fileManager.list(location, packageName, kinds, recurse),
-        new Function<JavaFileObject, JavaFileObject>(){
+  public Iterable<JavaFileObject> list(
+      Location location, String packageName, Set<Kind> kinds, boolean recurse) throws IOException {
+    return Iterables.transform(
+        fileManager.list(location, packageName, kinds, recurse),
+        new Function<JavaFileObject, JavaFileObject>() {
           @Override
           public JavaFileObject apply(JavaFileObject input) {
             return map(input);
@@ -80,10 +75,7 @@ class UsageAsInputReportingFileManager
         });
   }
 
-  /**
-   * Wraps a JavaFileObject in a UsageAsInputReportingJavaFileObject, shares
-   * existing instances.
-   */
+  /** Wraps a JavaFileObject in a UsageAsInputReportingJavaFileObject, shares existing instances. */
   private JavaFileObject map(JavaFileObject item) {
     if (item == null) {
       return item;
@@ -96,16 +88,15 @@ class UsageAsInputReportingFileManager
     return new UsageAsInputReportingJavaFileObject(item, usage);
   }
 
-  /**
-   * Helper to match loading source files and tracking their usage.
-   */
+  /** Helper to match loading source files and tracking their usage. */
   public Iterable<JavaFileObject> getJavaFileForSources(Iterable<String> sources) {
     List<String> sourceList = Lists.newArrayList(sources);
     String[] sourceArray = new String[sourceList.size()];
     sourceList.toArray(sourceArray);
 
-    return  Iterables.transform(fileManager.getJavaFileObjects(sourceArray),
-        new Function<JavaFileObject, JavaFileObject>(){
+    return Iterables.transform(
+        fileManager.getJavaFileObjects(sourceArray),
+        new Function<JavaFileObject, JavaFileObject>() {
           @Override
           public JavaFileObject apply(JavaFileObject input) {
             return map(input);
@@ -114,23 +105,23 @@ class UsageAsInputReportingFileManager
   }
 
   @Override
-  public JavaFileObject getJavaFileForInput(final Location location,
-                                            final String className,
-                                            final Kind kind) throws IOException {
+  public JavaFileObject getJavaFileForInput(
+      final Location location, final String className, final Kind kind) throws IOException {
     return map(fileManager.getJavaFileForInput(location, className, kind));
   }
 
   @Override
-  public JavaFileObject getJavaFileForOutput(Location location, String className, Kind kind,
-      FileObject sibling) throws IOException {
+  public JavaFileObject getJavaFileForOutput(
+      Location location, String className, Kind kind, FileObject sibling) throws IOException {
     // A java file opened initially for output might later get reopened for input (e.g.,
     // source files generated during annotation processing), so we need to track them too.
     return map(fileManager.getJavaFileForOutput(location, className, kind, unwrap(sibling)));
   }
 
   @Override
-  public FileObject getFileForOutput(Location location, String packageName,
-      String relativeName, FileObject sibling) throws IOException {
+  public FileObject getFileForOutput(
+      Location location, String packageName, String relativeName, FileObject sibling)
+      throws IOException {
     return fileManager.getFileForOutput(location, packageName, relativeName, unwrap(sibling));
   }
 

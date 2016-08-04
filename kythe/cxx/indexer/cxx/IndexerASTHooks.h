@@ -23,6 +23,7 @@
 #include <memory>
 #include <unordered_map>
 
+#include "glog/logging.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/ASTTypeTraits.h"
 #include "clang/AST/RecursiveASTVisitor.h"
@@ -30,8 +31,8 @@
 #include "clang/Sema/SemaConsumer.h"
 #include "clang/Sema/Template.h"
 
-#include "IndexerLibrarySupport.h"
 #include "GraphObserver.h"
+#include "IndexerLibrarySupport.h"
 
 namespace kythe {
 
@@ -49,8 +50,7 @@ public:
   /// \brief Constructs a new `MaybeFew` holding zero or more elements.
   /// If there are more than zero elements, the first one provided is primary.
   template <typename... Ts>
-  MaybeFew(Ts &&... Init)
-      : Content({std::forward<T>(Init)...}) {}
+  MaybeFew(Ts &&... Init) : Content({std::forward<T>(Init)...}) {}
 
   /// \brief Constructs an empty `MaybeFew`.
   ///
@@ -65,7 +65,7 @@ public:
   /// \brief Returns the primary element (the first one provided during
   /// construction).
   const T &primary() const {
-    assert(!Content.empty());
+    CHECK(!Content.empty());
     return Content[0];
   }
 
@@ -164,8 +164,13 @@ private:
   // are not triggered during data recursion.
   bool shouldUseDataRecursionFor(clang::Stmt *S) const { return false; }
 
-  template <typename T>
-  bool TraverseNode(T *Node, bool (VisitorBase::*traverse)(T *)) {
+  // Traverse an arbitrary AST node type and record the node used to get to
+  // it as that node's parent. `T` is the type of the node and
+  // `BaseTraverseFn` is the type of a function (or other value with
+  // an operator()) that invokes the base RecursiveASTVisitor traversal logic
+  // on values of type `T*` and returns a boolean traversal result.
+  template <typename T, typename BaseTraverseFn>
+  bool TraverseNode(T *Node, BaseTraverseFn traverse) {
     if (!Node)
       return true;
     if (!ParentStack.empty()) {
@@ -189,7 +194,7 @@ private:
           NodeOrVector = Vector;
           delete Node;
         }
-        assert(NodeOrVector.template is<IndexedParentVector *>());
+        CHECK(NodeOrVector.template is<IndexedParentVector *>());
 
         auto *Vector = NodeOrVector.template get<IndexedParentVector *>();
         // Skip duplicates for types that have memoization data.
@@ -205,7 +210,7 @@ private:
     }
     ParentStack.push_back(
         {clang::ast_type_traits::DynTypedNode::create(*Node), 0});
-    bool Result = (this->*traverse)(Node);
+    bool Result = traverse(Node);
     ParentStack.pop_back();
     if (!ParentStack.empty()) {
       ParentStack.back().Index++;
@@ -214,17 +219,27 @@ private:
   }
 
   bool TraverseDecl(clang::Decl *DeclNode) {
-    return TraverseNode(DeclNode, &VisitorBase::TraverseDecl);
+    return TraverseNode(DeclNode, [this](clang::Decl *Node) {
+      return VisitorBase::TraverseDecl(Node);
+    });
   }
 
   bool TraverseStmt(clang::Stmt *StmtNode) {
-    return TraverseNode(StmtNode, &VisitorBase::TraverseStmt);
+    return TraverseNode(StmtNode, [this](clang::Stmt *Node) {
+      return VisitorBase::TraverseStmt(Node);
+    });
   }
 
   IndexedParentMap *Parents;
   llvm::SmallVector<IndexedParent, 16> ParentStack;
 
   friend class RecursiveASTVisitor<IndexedParentASTVisitor>;
+};
+
+/// \brief Specifies whether uncommonly-used data should be dropped.
+enum Verbosity : bool {
+  Classic = true, ///< Emit all data.
+  Lite = false    ///< Emit only common data.
 };
 
 /// \brief Specifies what the indexer should do if it encounters a case it
@@ -240,14 +255,27 @@ enum BehaviorOnTemplates : bool {
   VisitInstantiations = true  ///< Visit template instantiations.
 };
 
+/// \brief A byte range that links to some node.
+struct MiniAnchor {
+  size_t Begin;
+  size_t End;
+  GraphObserver::NodeId AnchoredTo;
+};
+
+/// Adds brackets to Text to define anchor locations (escaping existing ones)
+/// and sorts Anchors such that the ith Anchor corresponds to the ith opening
+/// bracket. Drops empty or negative-length spans.
+void InsertAnchorMarks(std::string &Text, std::vector<MiniAnchor> &Anchors);
+
 /// \brief An AST visitor that extracts information for a translation unit and
 /// writes it to a `GraphObserver`.
 class IndexerASTVisitor : public clang::RecursiveASTVisitor<IndexerASTVisitor> {
 public:
   IndexerASTVisitor(clang::ASTContext &C, BehaviorOnUnimplemented B,
-                    BehaviorOnTemplates T, const LibrarySupports &S,
-                    clang::Sema &Sema, GraphObserver *GO = nullptr)
-      : IgnoreUnimplemented(B), TemplateMode(T),
+                    BehaviorOnTemplates T, Verbosity V,
+                    const LibrarySupports &S, clang::Sema &Sema,
+                    GraphObserver *GO = nullptr)
+      : IgnoreUnimplemented(B), TemplateMode(T), Verbosity(V),
         Observer(GO ? *GO : NullObserver), Context(C), Supports(S), Sema(Sema) {
   }
 
@@ -256,7 +284,9 @@ public:
   bool VisitDecl(const clang::Decl *Decl);
   bool VisitFieldDecl(const clang::FieldDecl *Decl);
   bool VisitVarDecl(const clang::VarDecl *Decl);
+  bool VisitNamespaceDecl(const clang::NamespaceDecl *Decl);
   bool VisitDeclRefExpr(const clang::DeclRefExpr *DRE);
+  bool VisitUnaryExprOrTypeTraitExpr(const clang::UnaryExprOrTypeTraitExpr *E);
   bool VisitCXXConstructExpr(const clang::CXXConstructExpr *E);
   bool VisitCXXDeleteExpr(const clang::CXXDeleteExpr *E);
   bool VisitCXXPseudoDestructorExpr(const clang::CXXPseudoDestructorExpr *E);
@@ -345,28 +375,29 @@ public:
   BuildNodeIdForTemplateArgument(const clang::TemplateArgument &Arg,
                                  clang::SourceLocation L);
 
+  /// \brief Builds a stable node ID for `Stmt`.
+  ///
+  /// This mechanism for generating IDs should only be used in contexts where
+  /// identifying statements through source locations/wraith contexts is not
+  /// possible (e.g., in implicit code).
+  ///
+  /// \param Decl The statement that is being identified
+  /// \return The node for `Stmt` if the statement was implicit; otherwise,
+  /// None.
+  MaybeFew<GraphObserver::NodeId>
+  BuildNodeIdForImplicitStmt(const clang::Stmt *Stmt);
+
   /// \brief Builds a stable node ID for `Decl`.
   ///
   /// \param Decl The declaration that is being identified.
   /// \return The node for `Decl`.
   GraphObserver::NodeId BuildNodeIdForDecl(const clang::Decl *Decl);
 
-  /// \brief Builds a stable node ID for `Decl` as a callable.
+  /// \brief Builds a stable node ID for `TND`.
   ///
-  /// \param Decl The callable declaration that is being identified.
-  /// \return The node for `Decl`.
+  /// \param Decl The declaration that is being identified.
   MaybeFew<GraphObserver::NodeId>
-  BuildNodeIdForCallableDecl(const clang::Decl *Decl);
-
-  /// \brief Builds an abstracted function type to ascribe to the callable
-  /// node for `Decl`.
-  ///
-  /// Callables abstract some details away from the terms they represent.
-  /// Because of this, the callable representation of a function F need not
-  /// have the same type as F. This function computes the type of Callable(F)
-  /// given F.
-  MaybeFew<GraphObserver::NodeId>
-  BuildNodeIdForCallableType(const clang::FunctionDecl *Decl);
+  BuildNodeIdForTypedefNameDecl(const clang::TypedefNameDecl *TND);
 
   /// \brief Builds a stable node ID for `Decl`.
   ///
@@ -499,6 +530,8 @@ public:
 
   bool TraverseFunctionTemplateDecl(clang::FunctionTemplateDecl *FTD);
 
+  bool TraverseTypeAliasTemplateDecl(clang::TypeAliasTemplateDecl *TATD);
+
   bool shouldVisitTemplateInstantiations() const {
     return TemplateMode == BehaviorOnTemplates::VisitInstantiations;
   }
@@ -509,7 +542,7 @@ public:
 
   /// \brief Records the range of a definition. If the range cannot be placed
   /// somewhere inside a source file, no record is made.
-  void MaybeRecordDefinitionRange(const GraphObserver::Range &R,
+  void MaybeRecordDefinitionRange(const MaybeFew<GraphObserver::Range> &R,
                                   const GraphObserver::NodeId &Id);
 
   /// \brief Returns the attached GraphObserver.
@@ -517,7 +550,27 @@ public:
 
   /// Returns `SR` as a `Range` in this `RecursiveASTVisitor`'s current
   /// RangeContext.
-  GraphObserver::Range RangeInCurrentContext(const clang::SourceRange &SR);
+  MaybeFew<GraphObserver::Range>
+  ExplicitRangeInCurrentContext(const clang::SourceRange &SR);
+
+  /// If `Implicit` is true, returns `Id` as an implicit Range; otherwise,
+  /// returns `SR` as a `Range` in this `RecursiveASTVisitor`'s current
+  /// RangeContext.
+  MaybeFew<GraphObserver::Range>
+  RangeInCurrentContext(bool Implicit, const GraphObserver::NodeId &Id,
+                        const clang::SourceRange &SR);
+
+  /// If `Id` is some NodeId, returns it as an implicit Range; otherwise,
+  /// returns `SR` as a `Range` in this `RecursiveASTVisitor`'s current
+  /// RangeContext.
+  MaybeFew<GraphObserver::Range>
+  RangeInCurrentContext(const MaybeFew<GraphObserver::NodeId> &Id,
+                        const clang::SourceRange &SR) {
+    if (auto &PrimaryId = Id) {
+      return GraphObserver::Range(PrimaryId.primary());
+    }
+    return ExplicitRangeInCurrentContext(SR);
+  }
 
 private:
   /// Whether we should stop on missing cases or continue on.
@@ -525,6 +578,9 @@ private:
 
   /// Should we visit template instantiations?
   BehaviorOnTemplates TemplateMode;
+
+  /// Should we emit all data?
+  enum Verbosity Verbosity;
 
   NullGraphObserver NullObserver;
   GraphObserver &Observer;
@@ -584,6 +640,19 @@ private:
   /// it should be paired with the spelled-out name of the object being declared
   /// to form an identifying token.
   uint64_t SemanticHash(const clang::EnumDecl *ED);
+
+  /// \brief Gets a format string for `ND`.
+  std::string GetFormat(const clang::NamedDecl *ND);
+
+  /// \brief Attempts to add a format string representation of `ND` to
+  /// `Ostream`.
+  /// \return true on success; false on failure.
+  bool AddFormatToStream(llvm::raw_string_ostream &Ostream,
+                         const clang::NamedDecl *ND);
+
+  /// \brief Attempts to find the ID of the first parent of `Decl` for
+  /// generating a format string.
+  MaybeFew<GraphObserver::NodeId> GetParentForFormat(const clang::Decl *D);
 
   /// \brief Attempts to add some representation of `ND` to `Ostream`.
   /// \return true on success; false on failure.
@@ -719,6 +788,9 @@ private:
   /// \brief Maps known Decls to their NodeIds.
   llvm::DenseMap<const clang::Decl *, GraphObserver::NodeId> DeclToNodeId;
 
+  /// \brief Maps EnumDecls to semantic hashes.
+  llvm::DenseMap<const clang::EnumDecl *, uint64_t> EnumToHash;
+
   /// \brief Enabled library-specific callbacks.
   const LibrarySupports &Supports;
 
@@ -730,14 +802,19 @@ private:
 class IndexerASTConsumer : public clang::SemaConsumer {
 public:
   explicit IndexerASTConsumer(GraphObserver *GO, BehaviorOnUnimplemented B,
-                              BehaviorOnTemplates T, const LibrarySupports &S)
-      : Observer(GO), IgnoreUnimplemented(B), TemplateMode(T), Supports(S) {}
+                              BehaviorOnTemplates T, Verbosity V,
+                              const LibrarySupports &S)
+      : Observer(GO), IgnoreUnimplemented(B), TemplateMode(T), Verbosity(V),
+        Supports(S) {}
 
   void HandleTranslationUnit(clang::ASTContext &Context) override {
-    assert(Sema != nullptr);
+    CHECK(Sema != nullptr);
     IndexerASTVisitor Visitor(Context, IgnoreUnimplemented, TemplateMode,
-                              Supports, *Sema, Observer);
-    Visitor.TraverseDecl(Context.getTranslationUnitDecl());
+                              Verbosity, Supports, *Sema, Observer);
+    {
+      ProfileBlock block(Observer->getProfilingCallback(), "traverse_tu");
+      Visitor.TraverseDecl(Context.getTranslationUnitDecl());
+    }
   }
 
   void InitializeSema(clang::Sema &S) override { Sema = &S; }
@@ -750,6 +827,8 @@ private:
   BehaviorOnUnimplemented IgnoreUnimplemented;
   /// Whether we should visit template instantiations.
   BehaviorOnTemplates TemplateMode;
+  /// Whether we should emit all data.
+  enum Verbosity Verbosity;
   /// Which library supports are enabled.
   const LibrarySupports &Supports;
   /// The active Sema instance.

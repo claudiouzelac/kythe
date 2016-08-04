@@ -16,6 +16,7 @@
 
 package com.google.devtools.kythe.platform.java.helpers;
 
+import com.google.common.collect.Lists;
 import com.sun.source.tree.AnnotatedTypeTree;
 import com.sun.source.tree.AnnotationTree;
 import com.sun.source.tree.ArrayAccessTree;
@@ -53,6 +54,7 @@ import com.sun.source.tree.MethodTree;
 import com.sun.source.tree.ModifiersTree;
 import com.sun.source.tree.NewArrayTree;
 import com.sun.source.tree.NewClassTree;
+import com.sun.source.tree.PackageTree;
 import com.sun.source.tree.ParameterizedTypeTree;
 import com.sun.source.tree.ParenthesizedTree;
 import com.sun.source.tree.PrimitiveTypeTree;
@@ -106,6 +108,7 @@ import com.sun.tools.javac.tree.JCTree.JCMethodInvocation;
 import com.sun.tools.javac.tree.JCTree.JCModifiers;
 import com.sun.tools.javac.tree.JCTree.JCNewArray;
 import com.sun.tools.javac.tree.JCTree.JCNewClass;
+import com.sun.tools.javac.tree.JCTree.JCPackageDecl;
 import com.sun.tools.javac.tree.JCTree.JCParens;
 import com.sun.tools.javac.tree.JCTree.JCPrimitiveTypeTree;
 import com.sun.tools.javac.tree.JCTree.JCReturn;
@@ -135,6 +138,10 @@ public class JCTreeScanner<R, P> implements TreeVisitor<R, P> {
       return null;
     }
     return tree == null ? null : tree.accept(this, p);
+  }
+
+  public R scanAll(P p, JCTree tree, JCTree... others) {
+    return scan(Lists.asList(tree, others), p);
   }
 
   public R scan(Iterable<? extends JCTree> trees, P p) {
@@ -167,9 +174,7 @@ public class JCTreeScanner<R, P> implements TreeVisitor<R, P> {
   }
 
   public R visitTopLevel(JCCompilationUnit tree, P p) {
-    R r = scan(tree.packageAnnotations, p);
-    r = scanAndReduce(tree.pid, p, r);
-    return scanAndReduce(tree.defs, p, r);
+    return scan(tree.defs, p);
   }
 
   @Override
@@ -475,10 +480,10 @@ public class JCTreeScanner<R, P> implements TreeVisitor<R, P> {
 
   @Override
   public final R visitCompoundAssignment(CompoundAssignmentTree tree, P p) {
-    return visitAssignop((JCAssignOp) tree, p);
+    return visitAssignOp((JCAssignOp) tree, p);
   }
 
-  public R visitAssignop(JCAssignOp tree, P p) {
+  public R visitAssignOp(JCAssignOp tree, P p) {
     R r = scan(tree.lhs, p);
     return scanAndReduce(tree.rhs, p, r);
   }
@@ -638,6 +643,7 @@ public class JCTreeScanner<R, P> implements TreeVisitor<R, P> {
     return scanAndReduce(tree.args, p, r);
   }
 
+  @Override
   public final R visitOther(Tree tree, P p) {
     if (tree instanceof TypeBoundKind) {
       return visitTypeBoundKind((TypeBoundKind) tree, p);
@@ -691,5 +697,15 @@ public class JCTreeScanner<R, P> implements TreeVisitor<R, P> {
   public R visitAnnotatedType(JCAnnotatedType tree, P p) {
     R r = scan(tree.annotations, p);
     return scanAndReduce(tree.underlyingType, p, r);
+  }
+
+  @Override
+  public final R visitPackage(PackageTree tree, P p) {
+    return visitPackage((JCPackageDecl) tree, p);
+  }
+
+  public final R visitPackage(JCPackageDecl tree, P p) {
+    R r = scan(tree.annotations, p);
+    return scanAndReduce(tree.pid, p, r);
   }
 }

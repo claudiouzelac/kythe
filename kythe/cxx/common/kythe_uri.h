@@ -21,9 +21,19 @@
 
 #include "kythe/cxx/common/vname_ordering.h"
 #include "kythe/proto/storage.pb.h"
-#include "llvm/ADT/StringRef.h"
 
 namespace kythe {
+
+/// \brief Determines the behavior of URI escaping.
+enum class UriEscapeMode {
+  kEscapeAll,   ///< Escape all reserved characters.
+  kEscapePaths  ///< Escape all reserved characters except '/'.
+};
+
+/// \brief URI-escapes a string.
+/// \param mode The escaping mode to use.
+/// \param string The string to escape.
+std::string UriEscape(UriEscapeMode mode, const std::string &uri);
 
 /// \brief A Kythe URI.
 ///
@@ -55,13 +65,13 @@ class URI {
   std::string ToString() const;
 
   /// \return This URI as a VName.
-  const kythe::proto::VName &v_name() { return vname_; }
+  const kythe::proto::VName &v_name() const { return vname_; }
 
  private:
   /// \brief Attempts to overwrite vname_ using the provided URI string.
   /// \param uri The URI to parse.
   /// \return true on success
-  bool ParseString(llvm::StringRef uri);
+  bool ParseString(const std::string &uri);
 
   /// The VName this URI represents.
   kythe::proto::VName vname_;

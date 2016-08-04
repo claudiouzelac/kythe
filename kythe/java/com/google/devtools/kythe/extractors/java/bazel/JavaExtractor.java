@@ -16,6 +16,8 @@
 
 package com.google.devtools.kythe.extractors.java.bazel;
 
+import com.google.common.base.Predicate;
+import com.google.common.collect.Iterables;
 import com.google.devtools.build.lib.actions.extra.ExtraActionInfo;
 import com.google.devtools.build.lib.actions.extra.ExtraActionsBase;
 import com.google.devtools.build.lib.actions.extra.JavaCompileInfo;
@@ -26,7 +28,6 @@ import com.google.devtools.kythe.extractors.shared.FileVNames;
 import com.google.devtools.kythe.extractors.shared.IndexInfoUtils;
 import com.google.protobuf.CodedInputStream;
 import com.google.protobuf.ExtensionRegistry;
-
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
@@ -34,8 +35,6 @@ import java.nio.file.Paths;
 
 /** Java CompilationUnit extractor using Bazel's extra_action feature. */
 public class JavaExtractor {
-  private static final String CORPUS = "kythe";
-
   public static void main(String[] args) throws IOException, ExtractionException {
     if (args.length != 3) {
       System.err.println("Usage: java_extractor extra-action-file output-file vname-config");
@@ -50,7 +49,7 @@ public class JavaExtractor {
     ExtraActionsBase.registerAllExtensions(registry);
 
     ExtraActionInfo info;
-    try (InputStream stream = Files.newInputStream(Paths.get(args[0]))) {
+    try (InputStream stream = Files.newInputStream(Paths.get(extraActionPath))) {
       CodedInputStream coded = CodedInputStream.newInstance(stream);
       info = ExtraActionInfo.parseFrom(coded, registry);
     }
@@ -60,18 +59,32 @@ public class JavaExtractor {
     }
 
     JavaCompileInfo jInfo = info.getExtension(JavaCompileInfo.javaCompileInfo);
-    CompilationDescription description = new JavaCompilationUnitExtractor(
-        FileVNames.fromFile(vNamesConfigPath),
-        System.getProperty("user.dir")).extract(
-            info.getOwner(),
-            jInfo.getSourceFileList(),
-            jInfo.getClasspathList(),
-            jInfo.getSourcepathList(),
-            jInfo.getProcessorpathList(),
-            jInfo.getProcessorList(),
-            jInfo.getJavacOptList(),
-            jInfo.getOutputjar());
+    CompilationDescription description =
+        new JavaCompilationUnitExtractor(
+                FileVNames.fromFile(vNamesConfigPath), System.getProperty("user.dir"))
+            .extract(
+                info.getOwner(),
+                jInfo.getSourceFileList(),
+                jInfo.getClasspathList(),
+                jInfo.getSourcepathList(),
+                jInfo.getProcessorpathList(),
+                jInfo.getProcessorList(),
+                Iterables.filter(jInfo.getJavacOptList(), JAVAC_OPT_FILTER),
+                jInfo.getOutputjar());
 
     IndexInfoUtils.writeIndexInfoToFile(description, outputPath);
   }
+
+  // Predicate that filters out Bazel-specific flags.  Bazel adds its own flags (such as error-prone
+  // flags) to the javac_opt list that cannot be handled by the standard javac compiler, or in turn,
+  // by this extractor.
+  private static final Predicate<String> JAVAC_OPT_FILTER =
+      new Predicate<String>() {
+        @Override
+        public boolean apply(String opt) {
+          return !(opt.startsWith("-Werror:")
+              || opt.startsWith("-extra_checks")
+              || opt.startsWith("-Xep"));
+        }
+      };
 }

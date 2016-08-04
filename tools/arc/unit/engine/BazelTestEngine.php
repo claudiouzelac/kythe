@@ -19,9 +19,25 @@
  * bazel wrapper.
  */
 final class BazelTestEngine extends ArcanistUnitTestEngine {
+  private $debug;
+  private $useConfig;
+  private $waitForBazel;
+
   private $project_root;
 
   public function run() {
+    if (getenv("DEBUG")) {
+      $this->debug = true;
+    }
+    $this->debugPrint("run");
+    if (getenv("USE_BAZELRC")) {
+      $this->useConfig = true;
+      print("WARNING: using default bazelrc\n");
+    }
+    if (getenv("WAIT_FOR_BAZEL")) {
+      $this->waitForBazel = true;
+    }
+
     $this->project_root = $this->getWorkingCopy()->getProjectRoot();
     $targets = $this->getTargets();
     if (empty($targets)) {
@@ -36,17 +52,24 @@ final class BazelTestEngine extends ArcanistUnitTestEngine {
   }
 
   private function getTargets() {
+    $this->debugPrint("getTargets()");
+
     if ($this->getRunAllTests()) {
       return array('//...');
-    } else if (empty($this->getPaths())) {
+    }
+
+    $files = $this->getFileTargets();
+    if (empty($files)) {
       print("No files affected\n");
       return array();
     }
+    $files = join($files, " ");
+    $this->debugPrint("files: " . $files);
 
-    $query_command = $this->bazelCommand(["query", "-k", "%s"]);
-    $files = join(" ",
-                  array_map(array('BazelTestEngine', 'fileToTarget'), $this->getPaths()));
-    $future = new ExecFuture($query_command, 'rdeps(//..., set('.$files.')) except kind("docker_build", rdeps(//..., set('.$files.')))');
+    $cmd = $this->bazelCommand("query", ["%s"]);
+    $query = 'rdeps(//..., set('.$files.')) except attr(tags, "docker|arc-ignore", //...)';
+    $this->debugPrint($query);
+    $future = new ExecFuture($cmd, $query);
     $future->setCWD($this->project_root);
     $status = $future->resolve();
     if ($status[0] != 3 && $status[0] != 0) {
@@ -60,14 +83,44 @@ final class BazelTestEngine extends ArcanistUnitTestEngine {
     return explode("\n", $output);
   }
 
+  private function getFileTargets() {
+    if (empty($this->getPaths())) {
+      return array();
+    }
+    $files = join(" ",
+                  array_map(array('BazelTestEngine', 'fileToTarget'), $this->getPaths()));
+    $future = new ExecFuture($this->bazelCommand("query", ["-k", "%s"]), 'set('.$files.')');
+    $future->setCWD($this->project_root);
+
+    $status = $future->resolve();
+    if ($status[0] != 3 && $status[0] != 0) {
+      throw new Exception("Bazel query error (".$status[0]."): ".$status[2]);
+    }
+
+    $output = trim($status[1]);
+    if ($output === "") {
+      return array();
+    }
+
+    return explode("\n", $output);
+  }
+
   private function runTests($targets) {
-    $future = new ExecFuture($this->bazelCommand(array_merge(["test", "--noshow_loading_progress", "--noshow_progress"], $targets)));
+    $this->debugPrint("runTests(" . join($targets, ", ") . ")");
+
+    $future = new ExecFuture($this->bazelCommand("test", array_merge([
+        "--verbose_failures",
+        "--test_tag_filters=-broken",
+        "--noshow_loading_progress",
+        "--noshow_progress"], $targets)));
     $future->setCWD($this->project_root);
     $status = $future->resolve();
     return $this->parseTestResults($targets, $status);
   }
 
   private function parseTestResults($targets, $status) {
+    $this->debugPrint("parseTestResults");
+
     $code = $status[0];
     $output = $status[1];
     $lines = explode("\n", $output);
@@ -79,8 +132,10 @@ final class BazelTestEngine extends ArcanistUnitTestEngine {
       throw new Exception($output . "\n" . $status[2]);
     }
 
-    $query_command = $this->bazelCommand(["query", "-k", "%s"]);
-    $future = new ExecFuture($query_command, 'tests(set('.join(" ", $targets).'))');
+    $cmd = $this->bazelCommand("query", ["-k", "%s"]);
+    $query = 'tests(set('.join(" ", $targets).')) except attr(tags, "broken", //...)';
+    $this->debugPrint($query);
+    $future = new ExecFuture($cmd, $query);
     $future->setCWD($this->project_root);
     $testTargets = explode("\n", trim($future->resolvex()[0]));
 
@@ -123,17 +178,23 @@ final class BazelTestEngine extends ArcanistUnitTestEngine {
     return "'" . $file . "'";
   }
 
-  private function getWebStatusPort() {
-    $port = intval(getenv("BAZEL_WEB_STATUS_PORT"));
-    if ($port > 0) {
-      return $port;
+  private function bazelCommand($subcommand, $args) {
+    $cmd = "bazel ";
+    if (!$this->useConfig) {
+      $cmd = $cmd . "--bazelrc=/dev/null ";
     }
-    return 0;
+    if (!$this->waitForBazel) {
+      $cmd = $cmd . "--noblock_for_lock ";
+    }
+    $cmd = $cmd . $subcommand . " --tool_tag=arcanist ";
+    $cmd = $cmd . join(" ", $args);
+    $this->debugPrint($cmd);
+    return $cmd;
   }
 
-  private function bazelCommand($args) {
-    return "bazel --bazelrc=/dev/null --noblock_for_lock "
-        . "--use_webstatusserver=" . $this->getWebStatusPort()
-        . " " . join(" ", $args);
+  private function debugPrint($msg) {
+    if ($this->debug) {
+      print("DEBUG: " . $msg . "\n");
+    }
   }
 }

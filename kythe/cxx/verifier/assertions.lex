@@ -16,7 +16,7 @@
  */
 // Started from the calc++ example code as part of the Bison-3.0 distribution.
 #include "kythe/cxx/verifier/assertions.h"
-#include "parser.yy.hh"
+#include "kythe/cxx/verifier/parser.yy.hh"
 #include <assert.h>
 
 // The offset of the current token (as byte offset).
@@ -96,6 +96,7 @@ blank [ \t]
 "!"      return yy::AssertionParserImpl::token::BANG;
 ":"      return yy::AssertionParserImpl::token::COLON;
 "+"      return yy::AssertionParserImpl::token::PLUS;
+"#"      return yy::AssertionParserImpl::token::HASH;
 {int}    yylval->string = yytext; return yy::AssertionParserImpl::token::NUMBER;
 {id}     yylval->string = yytext; return yy::AssertionParserImpl::token::IDENTIFIER;
 \"(\\.|[^\\"])*\" {

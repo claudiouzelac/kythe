@@ -36,14 +36,289 @@ static ThunkRet kNoException = {0};
 static ThunkRet kSolved = {1};
 /// \brief The program is invalid, so unwind.
 static ThunkRet kInvalidProgram = {2};
+/// \brief The goal group is known to be impossible to solve.
+static ThunkRet kImpossible = {3};
 /// \brief ThunkRets >= kFirstCut should unwind to the frame
 /// establishing that cut without changing assignments.
-static ThunkRet kFirstCut = {3};
+static ThunkRet kFirstCut = {4};
 
 typedef const std::function<ThunkRet()> &Thunk;
 
 static std::string *kDefaultDatabase = new std::string("builtin");
 static std::string *kStandardIn = new std::string("-");
+
+static bool EncodedIdentEqualTo(AstNode *a, AstNode *b) {
+  Identifier *ia = a->AsIdentifier();
+  Identifier *ib = b->AsIdentifier();
+  return ia->symbol() == ib->symbol();
+}
+
+static bool EncodedIdentLessThan(AstNode *a, AstNode *b) {
+  Identifier *ia = a->AsIdentifier();
+  Identifier *ib = b->AsIdentifier();
+  return ia->symbol() < ib->symbol();
+}
+
+static bool EncodedVNameEqualTo(App *a, App *b) {
+  Tuple *ta = a->rhs()->AsTuple();
+  Tuple *tb = b->rhs()->AsTuple();
+  for (int i = 0; i < 5; ++i) {
+    if (!EncodedIdentEqualTo(ta->element(i), tb->element(i))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static bool EncodedVNameLessThan(App *a, App *b) {
+  Tuple *ta = a->rhs()->AsTuple();
+  Tuple *tb = b->rhs()->AsTuple();
+  for (int i = 0; i < 4; ++i) {
+    if (EncodedIdentLessThan(ta->element(i), tb->element(i))) {
+      return true;
+    }
+    if (!EncodedIdentEqualTo(ta->element(i), tb->element(i))) {
+      return false;
+    }
+  }
+  return EncodedIdentLessThan(ta->element(4), tb->element(4));
+}
+
+static bool EncodedVNameOrIdentLessThan(AstNode *a, AstNode *b) {
+  App *aa = a->AsApp();  // nullptr if a is not a vname
+  App *ab = b->AsApp();  // nullptr if b is not a vname
+  if (aa && ab) {
+    return EncodedVNameLessThan(aa, ab);
+  } else if (!aa && ab) {
+    // Arbitrarily, vname < ident.
+    return true;
+  } else if (aa && !ab) {
+    return false;
+  } else {
+    return EncodedIdentLessThan(a, b);
+  }
+}
+
+static bool EncodedVNameOrIdentEqualTo(AstNode *a, AstNode *b) {
+  App *aa = a->AsApp();  // nullptr if a is not a vname
+  App *ab = b->AsApp();  // nullptr if b is not a vname
+  if (aa && ab) {
+    return EncodedVNameEqualTo(aa, ab);
+  } else if (!aa && ab) {
+    return false;
+  } else if (aa && !ab) {
+    return false;
+  } else {
+    return EncodedIdentEqualTo(a, b);
+  }
+}
+
+/// \brief Sort entries such that those that set fact values are adjacent.
+static bool EncodedFactLessThan(AstNode *a, AstNode *b) {
+  Tuple *ta = a->AsApp()->rhs()->AsTuple();
+  Tuple *tb = b->AsApp()->rhs()->AsTuple();
+  if (EncodedVNameOrIdentLessThan(ta->element(0), tb->element(0))) {
+    return true;
+  }
+  if (!EncodedVNameOrIdentEqualTo(ta->element(0), tb->element(0))) {
+    return false;
+  }
+  if (EncodedIdentLessThan(ta->element(1), tb->element(1))) {
+    return true;
+  }
+  if (!EncodedIdentEqualTo(ta->element(1), tb->element(1))) {
+    return false;
+  }
+  if (EncodedVNameOrIdentLessThan(ta->element(2), tb->element(2))) {
+    return true;
+  }
+  if (!EncodedVNameOrIdentEqualTo(ta->element(2), tb->element(2))) {
+    return false;
+  }
+  if (EncodedIdentLessThan(ta->element(3), tb->element(3))) {
+    return true;
+  }
+  if (!EncodedIdentEqualTo(ta->element(3), tb->element(3))) {
+    return false;
+  }
+  if (EncodedIdentLessThan(ta->element(4), tb->element(4))) {
+    return true;
+  }
+  return false;
+}
+
+static AstNode *DerefEVar(AstNode *node) {
+  while (node) {
+    if (auto *evar = node->AsEVar()) {
+      node = evar->current();
+    } else {
+      break;
+    }
+  }
+  return node;
+}
+
+static Identifier *SafeAsIdentifier(AstNode *node) {
+  return node == nullptr ? nullptr : node->AsIdentifier();
+}
+
+struct AtomFactKey {
+  Identifier *edge_kind;
+  Identifier *fact_name;
+  Identifier *fact_value;
+  Identifier *source_vname[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
+  Identifier *target_vname[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
+  // fact_tuple is expected to be a full tuple from a Fact head
+  AtomFactKey(AstNode *vname_head, Tuple *fact_tuple)
+      : edge_kind(SafeAsIdentifier(DerefEVar(fact_tuple->element(1)))),
+        fact_name(SafeAsIdentifier(DerefEVar(fact_tuple->element(3)))),
+        fact_value(SafeAsIdentifier(DerefEVar(fact_tuple->element(4)))) {
+    InitVNameFields(vname_head, fact_tuple->element(0), &source_vname[0]);
+    InitVNameFields(vname_head, fact_tuple->element(2), &target_vname[0]);
+  }
+  void InitVNameFields(AstNode *vname_head, AstNode *maybe_vname,
+                       Identifier **out) {
+    maybe_vname = DerefEVar(maybe_vname);
+    if (maybe_vname == nullptr) {
+      return;
+    }
+    if (auto *app = maybe_vname->AsApp()) {
+      if (DerefEVar(app->lhs()) != vname_head) {
+        return;
+      }
+      AstNode *maybe_tuple = DerefEVar(app->rhs());
+      if (maybe_tuple == nullptr) {
+        return;
+      }
+      if (auto *tuple = maybe_tuple->AsTuple()) {
+        if (tuple->size() != 5) {
+          return;
+        }
+        for (size_t i = 0; i < 5; ++i) {
+          out[i] = SafeAsIdentifier(DerefEVar(tuple->element(i)));
+        }
+      }
+    }
+  }
+};
+
+namespace {
+
+enum class Order { LT, EQ, GT };
+
+// How we order incomplete keys depends on whether we're looking for
+// an upper or lower bound. See below for details. The node passed in
+// must be an application of Fact to a full fact tuple.
+static Order CompareFactWithKey(Order incomplete, AstNode *a, AtomFactKey *k) {
+  Tuple *ta = a->AsApp()->rhs()->AsTuple();
+  if (k->edge_kind == nullptr) {
+    return incomplete;
+  } else if (EncodedIdentLessThan(ta->element(1), k->edge_kind)) {
+    return Order::LT;
+  } else if (!EncodedIdentEqualTo(ta->element(1), k->edge_kind)) {
+    return Order::GT;
+  }
+  if (k->fact_name == nullptr) {
+    return incomplete;
+  } else if (EncodedIdentLessThan(ta->element(3), k->fact_name)) {
+    return Order::LT;
+  } else if (!EncodedIdentEqualTo(ta->element(3), k->fact_name)) {
+    return Order::GT;
+  }
+  if (k->fact_value == nullptr) {
+    return incomplete;
+  } else if (EncodedIdentLessThan(ta->element(4), k->fact_value)) {
+    return Order::LT;
+  } else if (!EncodedIdentEqualTo(ta->element(4), k->fact_value)) {
+    return Order::GT;
+  }
+  auto vname_compare = [incomplete](Tuple *va, Identifier *tuple[5]) {
+    for (size_t i = 0; i < 5; ++i) {
+      if (tuple[i] == nullptr) {
+        return incomplete;
+      }
+      if (EncodedIdentLessThan(va->element(i), tuple[i])) {
+        return Order::LT;
+      }
+      if (!EncodedIdentEqualTo(va->element(i), tuple[i])) {
+        return Order::GT;
+      }
+    }
+    return Order::EQ;
+  };
+  if (Tuple *vs = ta->element(0)->AsApp()->rhs()->AsTuple()) {
+    auto ord = vname_compare(vs, k->source_vname);
+    if (ord != Order::EQ) {
+      return ord;
+    }
+  }
+  if (auto *app = ta->element(2)->AsApp()) {
+    if (Tuple *vt = app->rhs()->AsTuple()) {
+      auto ord = vname_compare(vt, k->target_vname);
+      if (ord != Order::EQ) {
+        return ord;
+      }
+    }
+  }
+  return Order::EQ;
+}
+}
+
+// We want to be able to find the following bounds:
+// (0,0,2,3) (0,1,2,3) (0,1,2,4) (1,1,2,4)
+//          ^---  (0,1,_,_)  ---^
+
+static bool FastLookupKeyLessThanFact(AtomFactKey *k, AstNode *a) {
+  // This is used to find upper bounds, so keys with incomplete suffixes should
+  // be ordered after all facts that share their complete prefixes.
+  return CompareFactWithKey(Order::LT, a, k) == Order::GT;
+}
+
+static bool FastLookupFactLessThanKey(AstNode *a, AtomFactKey *k) {
+  // This is used to find lower bounds, so keys with incomplete suffixes should
+  // be ordered after facts with lower prefixes but before facts with complete
+  // suffixes.
+  return CompareFactWithKey(Order::GT, a, k) == Order::LT;
+}
+
+//  Sort entries in lexicographic order, collating as:
+// `(edge_kind, fact_name, fact_value, source_node, target_node)`.
+// In practice most unification was happening between tuples
+// with the first three fields present; then source_node
+// missing some of the time; then target_node missing most of
+// the time.
+static bool FastLookupFactLessThan(AstNode *a, AstNode *b) {
+  Tuple *ta = a->AsApp()->rhs()->AsTuple();
+  Tuple *tb = b->AsApp()->rhs()->AsTuple();
+  if (EncodedIdentLessThan(ta->element(1), tb->element(1))) {
+    return true;
+  }
+  if (!EncodedIdentEqualTo(ta->element(1), tb->element(1))) {
+    return false;
+  }
+  if (EncodedIdentLessThan(ta->element(3), tb->element(3))) {
+    return true;
+  }
+  if (!EncodedIdentEqualTo(ta->element(3), tb->element(3))) {
+    return false;
+  }
+  if (EncodedIdentLessThan(ta->element(4), tb->element(4))) {
+    return true;
+  }
+  if (!EncodedIdentEqualTo(ta->element(4), tb->element(4))) {
+    return false;
+  }
+  if (EncodedVNameOrIdentLessThan(ta->element(0), tb->element(0))) {
+    return true;
+  }
+  if (!EncodedVNameOrIdentEqualTo(ta->element(0), tb->element(0))) {
+    return false;
+  }
+  if (EncodedVNameOrIdentLessThan(ta->element(2), tb->element(2))) {
+    return true;
+  }
+  return false;
+}
 
 // The Solver acts in a closed world: any universal quantification can be
 // exhaustively tested against database facts.
@@ -58,8 +333,12 @@ class Solver {
   using Inspection = AssertionParser::Inspection;
 
   Solver(Verifier *context, Database &database,
+         std::multimap<std::pair<size_t, size_t>, AstNode *> &anchors,
          std::function<bool(Verifier *, const Inspection &)> &inspect)
-      : context_(*context), database_(database), inspect_(inspect) {}
+      : context_(*context),
+        database_(database),
+        anchors_(anchors),
+        inspect_(inspect) {}
 
   ThunkRet UnifyTuple(Tuple *st, Tuple *tt, size_t ofs, size_t max,
                       ThunkRet cut, Thunk f) {
@@ -94,6 +373,12 @@ class Solver {
         }
         return UnifyTuple(st, tt, 0, st->size(), cut, f);
       }
+    } else if (Range *sr = s->AsRange()) {
+      if (Range *tr = t->AsRange()) {
+        if (sr->begin() == tr->begin() && sr->end() == tr->end()) {
+          return f();
+        }
+      }
     }
     return kNoException;
   }
@@ -109,6 +394,8 @@ class Solver {
           return true;
         }
       }
+      return false;
+    } else if (Range *r = t->AsRange()) {
       return false;
     } else {
       CHECK(t->AsIdentifier() && "Inexhaustive match.");
@@ -141,10 +428,29 @@ class Solver {
     return f_ret;
   }
 
-  // TODO(zarko): For databases of nontrivial size this is obviously too
-  // expensive. Consider indexing the database. Optimizing for #fact-headed
-  // atoms with #vnodes at locations 0 and 2 is probably a very good idea.
   ThunkRet MatchAtomVersusDatabase(AstNode *atom, ThunkRet cut, Thunk f) {
+    if (auto *app = atom->AsApp()) {
+      if (app->lhs() == context_.fact_id()) {
+        if (auto *tuple = app->rhs()->AsTuple()) {
+          if (tuple->size() == 5) {
+            AtomFactKey key(context_.vname_id(), tuple);
+            // Make use of the fast lookup sort order.
+            auto begin = std::lower_bound(database_.begin(), database_.end(),
+                                          &key, FastLookupFactLessThanKey);
+            auto end = std::upper_bound(database_.begin(), database_.end(),
+                                        &key, FastLookupKeyLessThanFact);
+            for (auto i = begin; i != end; ++i) {
+              ThunkRet exc = Unify(atom, *i, cut, f);
+              if (exc != kNoException) {
+                return exc;
+              }
+            }
+            return kNoException;
+          }
+        }
+      }
+    }
+    // Not enough information to filter by.
     for (size_t fact = 0; fact < database_.size(); ++fact) {
       ThunkRet exc = Unify(atom, database_[fact], cut, f);
       if (exc != kNoException) {
@@ -154,20 +460,45 @@ class Solver {
     return kNoException;
   }
 
-  ThunkRet MatchAtom(AstNode *atom, AstNode *program, ThunkRet cut, Thunk f) {
-    // We only have the database and eq-constraints right now.
-    assert(program == nullptr);
+  /// \brief If `atom` has the syntactic form =(a, b), returns the tuple (a, b).
+  /// Otherwise returns `null`.
+  Tuple *MatchEqualsArgs(AstNode *atom) {
     if (App *a = atom->AsApp()) {
       if (Identifier *id = a->lhs()->AsIdentifier()) {
         if (id->symbol() == context_.eq_id()->symbol()) {
           if (Tuple *tu = a->rhs()->AsTuple()) {
             if (tu->size() == 2) {
-              // =(a, b) succeeds if unify(a, b) succeeds.
-              return Unify(tu->element(0), tu->element(1), cut, f);
+              return tu;
             }
           }
         }
       }
+    }
+    return nullptr;
+  }
+
+  ThunkRet MatchAtom(AstNode *atom, AstNode *program, ThunkRet cut, Thunk f) {
+    // We only have the database and eq-constraints right now.
+    assert(program == nullptr);
+    if (auto *tu = MatchEqualsArgs(atom)) {
+      if (Range *r = tu->element(0)->AsRange()) {
+        auto anchors =
+            anchors_.equal_range(std::make_pair(r->begin(), r->end()));
+        if (anchors.first == anchors.second) {
+          // There's no anchor with this range in the database.
+          // This goal can therefore never succeed.
+          return kImpossible;
+        }
+        for (auto anchor = anchors.first; anchor != anchors.second; ++anchor) {
+          ThunkRet unify_ret = Unify(anchor->second, tu->element(1), cut, f);
+          if (unify_ret != kNoException) {
+            return unify_ret;
+          }
+        }
+        return kNoException;
+      }
+      // =(a, b) succeeds if unify(a, b) succeeds.
+      return Unify(tu->element(0), tu->element(1), cut, f);
     }
     return MatchAtomVersusDatabase(atom, cut, f);
   }
@@ -222,7 +553,7 @@ class Solver {
         if (group->accept_if != AssertionParser::GoalGroup::kNoneMayFail) {
           return PerformInspection() ? kNoException : kInvalidProgram;
         }
-      } else if (result == kNoException) {
+      } else if (result == kNoException || result == kImpossible) {
         // That last goal group failed.
         if (group->accept_if != AssertionParser::GoalGroup::kSomeMustFail) {
           return PerformInspection() ? kNoException : kInvalidProgram;
@@ -246,6 +577,7 @@ class Solver {
  private:
   Verifier &context_;
   Database &database_;
+  std::multimap<std::pair<size_t, size_t>, AstNode *> &anchors_;
   std::function<bool(Verifier *, const Inspection &)> &inspect_;
   size_t highest_group_reached_ = 0;
   size_t highest_goal_reached_ = 0;
@@ -260,6 +592,9 @@ Verifier::Verifier(bool trace_lex, bool trace_parse)
   fact_id_ = IdentifierFor(builtin_location_, "fact");
   vname_id_ = IdentifierFor(builtin_location_, "vname");
   kind_id_ = IdentifierFor(builtin_location_, "/kythe/node/kind");
+  anchor_id_ = IdentifierFor(builtin_location_, "anchor");
+  start_id_ = IdentifierFor(builtin_location_, "/kythe/loc/start");
+  end_id_ = IdentifierFor(builtin_location_, "/kythe/loc/end");
   root_id_ = IdentifierFor(builtin_location_, "/");
   eq_id_ = IdentifierFor(builtin_location_, "=");
   ordinal_id_ = IdentifierFor(builtin_location_, "/kythe/ordinal");
@@ -420,7 +755,7 @@ bool Verifier::VerifyAllGoals(
   if (!PrepareDatabase()) {
     return false;
   }
-  Solver solver(this, facts_, inspect);
+  Solver solver(this, facts_, anchors_, inspect);
   bool result = solver.Solve();
   highest_goal_reached_ = solver.highest_goal_reached();
   highest_group_reached_ = solver.highest_group_reached();
@@ -466,105 +801,6 @@ AstNode *Verifier::MakePredicate(const yy::location &location, AstNode *head,
   }
   AstNode *tuple = new (&arena_) Tuple(location, values_count, body);
   return new (&arena_) App(location, head, tuple);
-}
-
-static bool EncodedIdentEqualTo(AstNode *a, AstNode *b) {
-  Identifier *ia = a->AsIdentifier();
-  Identifier *ib = b->AsIdentifier();
-  return ia->symbol() == ib->symbol();
-}
-
-static bool EncodedIdentLessThan(AstNode *a, AstNode *b) {
-  Identifier *ia = a->AsIdentifier();
-  Identifier *ib = b->AsIdentifier();
-  return ia->symbol() < ib->symbol();
-}
-
-static bool EncodedVNameEqualTo(App *a, App *b) {
-  Tuple *ta = a->rhs()->AsTuple();
-  Tuple *tb = b->rhs()->AsTuple();
-  for (int i = 0; i < 5; ++i) {
-    if (!EncodedIdentEqualTo(ta->element(i), tb->element(i))) {
-      return false;
-    }
-  }
-  return true;
-}
-
-static bool EncodedVNameLessThan(App *a, App *b) {
-  Tuple *ta = a->rhs()->AsTuple();
-  Tuple *tb = b->rhs()->AsTuple();
-  for (int i = 0; i < 4; ++i) {
-    if (EncodedIdentLessThan(ta->element(i), tb->element(i))) {
-      return true;
-    }
-    if (!EncodedIdentEqualTo(ta->element(i), tb->element(i))) {
-      return false;
-    }
-  }
-  return EncodedIdentLessThan(ta->element(4), tb->element(4));
-}
-
-static bool EncodedVNameOrIdentLessThan(AstNode *a, AstNode *b) {
-  App *aa = a->AsApp();  // nullptr if a is not a vname
-  App *ab = b->AsApp();  // nullptr if b is not a vname
-  if (aa && ab) {
-    return EncodedVNameLessThan(aa, ab);
-  } else if (!aa && ab) {
-    // Arbitrarily, vname < ident.
-    return true;
-  } else if (aa && !ab) {
-    return false;
-  } else {
-    return EncodedIdentLessThan(a, b);
-  }
-}
-
-static bool EncodedVNameOrIdentEqualTo(AstNode *a, AstNode *b) {
-  App *aa = a->AsApp();  // nullptr if a is not a vname
-  App *ab = b->AsApp();  // nullptr if b is not a vname
-  if (aa && ab) {
-    return EncodedVNameEqualTo(aa, ab);
-  } else if (!aa && ab) {
-    return false;
-  } else if (aa && !ab) {
-    return false;
-  } else {
-    return EncodedIdentEqualTo(a, b);
-  }
-}
-
-static bool EncodedFactLessThan(AstNode *a, AstNode *b) {
-  Tuple *ta = a->AsApp()->rhs()->AsTuple();
-  Tuple *tb = b->AsApp()->rhs()->AsTuple();
-  if (EncodedVNameOrIdentLessThan(ta->element(0), tb->element(0))) {
-    return true;
-  }
-  if (!EncodedVNameOrIdentEqualTo(ta->element(0), tb->element(0))) {
-    return false;
-  }
-  if (EncodedIdentLessThan(ta->element(1), tb->element(1))) {
-    return true;
-  }
-  if (!EncodedIdentEqualTo(ta->element(1), tb->element(1))) {
-    return false;
-  }
-  if (EncodedVNameOrIdentLessThan(ta->element(2), tb->element(2))) {
-    return true;
-  }
-  if (!EncodedVNameOrIdentEqualTo(ta->element(2), tb->element(2))) {
-    return false;
-  }
-  if (EncodedIdentLessThan(ta->element(3), tb->element(3))) {
-    return true;
-  }
-  if (!EncodedIdentEqualTo(ta->element(3), tb->element(3))) {
-    return false;
-  }
-  if (EncodedIdentLessThan(ta->element(4), tb->element(4))) {
-    return true;
-  }
-  return false;
 }
 
 /// \brief Sort nodes such that nodes and facts are grouped.
@@ -668,6 +904,8 @@ bool Verifier::PrepareDatabase() {
   // Now we can do a simple pairwise check on each of the facts to see
   // whether the invariants hold.
   bool is_ok = true;
+  AstNode *last_anchor_vname = nullptr;
+  size_t last_anchor_start = ~0;
   for (size_t f = 0; f < facts_.size(); ++f) {
     AstNode *fb = facts_[f];
 
@@ -677,6 +915,48 @@ bool Verifier::PrepareDatabase() {
       printer.Print("\n");
       is_ok = false;
       continue;
+    }
+    Tuple *tb = fb->AsApp()->rhs()->AsTuple();
+    if (tb->element(1) == empty_string_id_ &&
+        tb->element(2) == empty_string_id_) {
+      // Check to see if this fact entry describes part of an anchor.
+      // We've arranged via EncodedFactLessThan to sort kind_id_ before
+      // start_id_ and start_id_ before end_id_ and to group all node facts
+      // together in uninterrupted runs.
+      if (EncodedIdentEqualTo(tb->element(3), kind_id_) &&
+          EncodedIdentEqualTo(tb->element(4), anchor_id_)) {
+        // Start tracking a new anchor.
+        last_anchor_vname = tb->element(0);
+        last_anchor_start = ~0;
+      } else if (last_anchor_vname != nullptr &&
+                 EncodedIdentEqualTo(tb->element(3), start_id_) &&
+                 tb->element(4)->AsIdentifier()) {
+        if (EncodedVNameOrIdentEqualTo(last_anchor_vname, tb->element(0))) {
+          // This is a fact about the anchor we're tracking.
+          std::stringstream(
+              symbol_table_.text(tb->element(4)->AsIdentifier()->symbol())) >>
+              last_anchor_start;
+        } else {
+          // This is a fact about node we're not tracking; given our sort order,
+          // we'll never get enough information for the node we are tracking,
+          // so stop tracking it.
+          last_anchor_vname = nullptr;
+          last_anchor_start = ~0;
+        }
+      } else if (last_anchor_start != ~0 &&
+                 EncodedIdentEqualTo(tb->element(3), end_id_) &&
+                 tb->element(4)->AsIdentifier()) {
+        if (EncodedVNameOrIdentEqualTo(last_anchor_vname, tb->element(0))) {
+          // We have enough information about the anchor we're tracking.
+          size_t last_anchor_end = ~0;
+          std::stringstream(
+              symbol_table_.text(tb->element(4)->AsIdentifier()->symbol())) >>
+              last_anchor_end;
+          AddAnchor(last_anchor_vname, last_anchor_start, last_anchor_end);
+        }
+        last_anchor_vname = nullptr;
+        last_anchor_start = ~0;
+      }
     }
     if (f == 0) {
       continue;
@@ -693,7 +973,6 @@ bool Verifier::PrepareDatabase() {
       continue;
     }
     Tuple *ta = fa->AsApp()->rhs()->AsTuple();
-    Tuple *tb = fb->AsApp()->rhs()->AsTuple();
     if (EncodedVNameEqualTo(ta->element(0)->AsApp(), tb->element(0)->AsApp()) &&
         ta->element(1) == empty_string_id_ &&
         tb->element(1) == empty_string_id_ &&
@@ -708,6 +987,9 @@ bool Verifier::PrepareDatabase() {
       printer.Print("\n");
       is_ok = false;
     }
+  }
+  if (is_ok) {
+    std::sort(facts_.begin(), facts_.end(), FastLookupFactLessThan);
   }
   database_prepared_ = is_ok;
   return is_ok;
@@ -739,15 +1021,28 @@ void Verifier::AssertSingleFact(std::string *database, unsigned int fact_id,
   AstNode **values = (AstNode **)arena_.New(sizeof(AstNode *) * 5);
   values[0] =
       entry.has_source() ? ConvertVName(loc, entry.source()) : empty_string_id_;
-  values[1] = entry.edge_kind().empty() ? empty_string_id_
-                                        : IdentifierFor(loc, entry.edge_kind());
+  // We're removing support for ordinal facts. Support them during the
+  // transition, but also support the new dot-separated edge kinds that serve
+  // the same purpose.
+  auto dot_pos = entry.edge_kind().rfind('.');
+  if (dot_pos != std::string::npos && dot_pos > 0 &&
+      dot_pos < entry.edge_kind().size() - 1) {
+    values[1] = IdentifierFor(loc, entry.edge_kind().substr(0, dot_pos));
+    values[3] = ordinal_id_;
+    values[4] = IdentifierFor(loc, entry.edge_kind().substr(dot_pos + 1));
+  } else {
+    values[1] = entry.edge_kind().empty()
+                    ? empty_string_id_
+                    : IdentifierFor(loc, entry.edge_kind());
+    values[3] = entry.fact_name().empty()
+                    ? empty_string_id_
+                    : IdentifierFor(loc, entry.fact_name());
+    values[4] = entry.fact_value().empty()
+                    ? empty_string_id_
+                    : IdentifierFor(loc, entry.fact_value());
+  }
   values[2] =
       entry.has_target() ? ConvertVName(loc, entry.target()) : empty_string_id_;
-  values[3] = entry.fact_name().empty() ? empty_string_id_
-                                        : IdentifierFor(loc, entry.fact_name());
-  values[4] = entry.fact_value().empty()
-                  ? empty_string_id_
-                  : IdentifierFor(loc, entry.fact_value());
 
   AstNode *tuple = new (&arena_) Tuple(loc, 5, values);
   AstNode *fact = new (&arena_) App(fact_id_, tuple);

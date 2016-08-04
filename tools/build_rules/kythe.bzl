@@ -1,40 +1,50 @@
+load("@//tools/cdexec:cdexec.bzl", "rootpath")
+
 def extract(ctx, kindex, args, inputs=[], mnemonic=None):
-  cmd_helper = ctx.command_helper([ctx.attr._extractor], {})
-  tools = cmd_helper.resolved_tools
-  input_manifests = cmd_helper.runfiles_manifests
-  cmd = '\n'.join([
-      "set -e",
-      'export KYTHE_ROOT_DIRECTORY="$PWD"',
-      'export KYTHE_OUTPUT_DIRECTORY="$(dirname ' + kindex.path + ')"',
-      'export KYTHE_VNAMES="' + ctx.file.vnames_config.path + '"',
-      'rm -rf "$KYTHE_OUTPUT_DIRECTORY"',
-      'mkdir -p "$KYTHE_OUTPUT_DIRECTORY"',
-      ctx.executable._extractor.path + " " + ' '.join(args),
-      'mv "$KYTHE_OUTPUT_DIRECTORY"/*.kindex ' + kindex.path])
+  tool_inputs, _, input_manifests = ctx.resolve_command(tools=[ctx.attr._extractor])
+  env = {
+      "KYTHE_ROOT_DIRECTORY": ".",
+      "KYTHE_OUTPUT_FILE": kindex.path,
+      "KYTHE_VNAMES": ctx.file.vnames_config.path,
+  }
   ctx.action(
-      inputs = ctx.files.srcs + tools + inputs + [ctx.file.vnames_config],
+      inputs = ctx.files.srcs + inputs + tool_inputs + [ctx.file.vnames_config],
       outputs = [kindex],
       mnemonic = mnemonic,
-      command = cmd,
+      executable = ctx.executable._extractor,
+      arguments = args,
       input_manifests = input_manifests,
-      use_default_shell_env = True)
+      env = env)
 
 def index(ctx, kindex, entries, mnemonic=None):
-  cmd_helper = ctx.command_helper([ctx.attr._indexer], {})
-  tools = cmd_helper.resolved_tools
-  input_manifests = cmd_helper.runfiles_manifests
-  cmd = "set -e;" + ctx.executable._indexer.path + " " + " ".join(ctx.attr.indexer_opts) + " " + kindex.path + " >" + entries.path
+  tools = [ctx.attr._indexer]
+  indexer = [ctx.executable._indexer.path]
+  paths = [kindex.path, entries.path]
+  # If '_cdexec' is requested, munge the arguments appropriately.
+  if hasattr(ctx.executable, "_cdexec"):
+    tools += [ctx.attr._cdexec]
+    indexer = [ctx.executable._cdexec.path,
+               "-t", ctx.label.name + ".XXXXXX",
+               rootpath(ctx.executable._indexer.path)]
+    paths = [rootpath(kindex.path), entries.path]
+  inputs, _, input_manifests = ctx.resolve_command(tools=tools)
+  # Quote and execute all arguments, except the last,
+  # which is used as a redirection for gzip.
+  # _cdexec is required for the Java indexer, which refuses to run
+  # in the source directory. See https://kythe.io/phabricator/T70
+  cmd = '("${@:1:${#@}-1}" || rm -f "${@:${#@}}") | gzip > "${@:${#@}}"'
   ctx.action(
-      inputs = [kindex] + tools,
+      inputs = [kindex] + inputs,
       outputs = [entries],
       mnemonic = mnemonic,
       command = cmd,
+      arguments = indexer + ctx.attr.indexer_opts + paths,
       input_manifests = input_manifests,
-      use_default_shell_env = True)
+  )
 
 def verify(ctx, entries):
   all_srcs = set(ctx.files.srcs)
-  all_entries = set([entries])
+  all_entries = set(entries)
   for dep in ctx.attr.deps:
     all_srcs += dep.sources
     all_entries += [dep.entries]
@@ -44,7 +54,7 @@ def verify(ctx, entries):
       content = '\n'.join([
         "#!/bin/bash -e",
         "set -o pipefail",
-        "cat " + " ".join(cmd_helper.template(all_entries, "%{short_path}")) + " | " +
+        "gunzip -c " + " ".join(cmd_helper.template(all_entries, "%{short_path}")) + " | " +
         ctx.executable._verifier.short_path + " " + " ".join(ctx.attr.verifier_opts) +
         " " + cmd_helper.join_paths(" ", all_srcs),
       ]),
@@ -65,7 +75,7 @@ def java_verifier_test_impl(ctx):
   jar = ctx.new_file(ctx.configuration.bin_dir, ctx.label.name + ".jar")
   srcs_out = jar.path + '.srcs'
 
-  args = ['-encoding', 'utf-8', '-cp', "'" + ':'.join(classpath) + "'", '-d', srcs_out]
+  args = ['-encoding', 'utf-8', '-cp', ':'.join(classpath), '-d', srcs_out]
   for src in ctx.files.srcs:
     args += [src.short_path]
 
@@ -75,20 +85,20 @@ def java_verifier_test_impl(ctx):
       mnemonic = 'MockJavac',
       command = '\n'.join([
           'set -e',
-          'rm -rf ' + srcs_out,
-          'mkdir ' + srcs_out,
-          ctx.file._javac.path + '  ' + ' '.join(args),
+          'mkdir -p ' + srcs_out,
+          ctx.file._javac.path + '  "$@"',
           ctx.file._jar.path + ' cf ' + jar.path + ' -C ' + srcs_out + ' .',
       ]),
-      use_default_shell_env = True)
+      arguments = args,
+  )
 
   kindex = ctx.new_file(ctx.configuration.genfiles_dir, ctx.label.name + "/compilation.kindex")
   extract(ctx, kindex, args, inputs=inputs+[jar], mnemonic='JavacExtractor')
 
-  entries = ctx.new_file(ctx.configuration.bin_dir, ctx.label.name + ".entries")
+  entries = ctx.new_file(ctx.configuration.bin_dir, ctx.label.name + ".entries.gz")
   index(ctx, kindex, entries, mnemonic='JavaIndexer')
 
-  runfiles = verify(ctx, entries)
+  runfiles = verify(ctx, [entries])
   return struct(
       runfiles = runfiles,
       jar = jar,
@@ -99,30 +109,22 @@ def java_verifier_test_impl(ctx):
 
 def cc_verifier_test_impl(ctx):
   entries = []
-  concat_entries = ctx.new_file(ctx.configuration.bin_dir, ctx.label.name + ".entries")
-  concat_entries_cmd = ""
 
   for src in ctx.files.srcs:
     args = ['-std=c++11']
-    if str(ctx.configuration).find('darwin') >= 0:
-      # TODO(zarko): This needs to be autodetected.
-      args += ['-I/usr/include/c++/4.2.1']
+    if ctx.var['TARGET_CPU'] == 'darwin':
+      # TODO(zarko): This needs to be autodetected (or does doing so even make
+      # sense?)
+      args += ['-I/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/include/c++/v1']
+      args += ['-I/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX10.11.sdk/usr/include']
     args += ['-c', src.short_path]
-    kindex = ctx.new_file(ctx.configuration.genfiles_dir, ctx.label.name + "/compilation/" + src.short_path + ".kindex")
+    kindex = ctx.new_file(ctx.label.name + ".compilation/" + src.short_path + ".kindex")
     extract(ctx, kindex, args, inputs=[src], mnemonic='CcExtractor')
-    entry = ctx.new_file(ctx.configuration.genfiles_dir, ctx.label.name + "/compilation/" + src.short_path + ".entries")
+    entry = ctx.new_file(ctx.label.name + ".compilation/" + src.short_path + ".entries.gz")
     entries += [entry]
     index(ctx, kindex, entry, mnemonic='CcIndexer')
-    concat_entries_cmd += 'cat ' + entry.path + ' >> ' + concat_entries.path + '\n'
 
-  ctx.action(
-    inputs = ctx.files.srcs + entries,
-    outputs = [concat_entries],
-    mnemonic = 'ConcatEntries',
-    command = concat_entries_cmd,
-    use_default_shell_env = True)
-
-  runfiles = verify(ctx, concat_entries)
+  runfiles = verify(ctx, entries)
   return struct(
       runfiles = runfiles,
   )
@@ -161,16 +163,21 @@ java_verifier_test = rule(
             default = Label("//kythe/java/com/google/devtools/kythe/analyzers/java:indexer"),
             executable = True,
         ),
+        "indexer_opts": attr.string_list(["--verbose"]),
+        "_cdexec": attr.label(
+            default = Label("//tools/cdexec:cdexec"),
+            executable = True,
+        ),
         "_javac": attr.label(
-            default = Label("//tools/jdk:javac"),
+            default = Label("@bazel_tools//tools/jdk:javac"),
             single_file = True,
         ),
         "_jar": attr.label(
-            default = Label("//tools/jdk:jar"),
+            default = Label("@bazel_tools//tools/jdk:jar"),
             single_file = True,
         ),
         "_jdk": attr.label(
-            default = Label("//tools/jdk:jdk"),
+            default = Label("@bazel_tools//tools/jdk:jdk"),
             allow_files = True,
         ),
     },
@@ -196,8 +203,9 @@ cc_verifier_test = rule(
             default = Label("//kythe/cxx/indexer/cxx:indexer"),
             executable = True,
         ),
-        "indexer_opts": attr.string_list(["-ignore_unimplemented"]),
+        "indexer_opts": attr.string_list(["--ignore_unimplemented=true"]),
     },
     executable = True,
+    output_to_genfiles = True,
     test = True,
 )

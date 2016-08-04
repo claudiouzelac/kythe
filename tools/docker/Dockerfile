@@ -27,7 +27,7 @@ RUN echo deb http://http.debian.net/debian jessie-backports main >> /etc/apt/sou
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       git pkg-config zip unzip rsync patch zsh wget net-tools less parallel locales make \
-      g++ gcc openjdk-8-jdk openjdk-8-source clang-3.5 golang-go flex asciidoc source-highlight graphviz \
+      g++ gcc openjdk-8-jdk openjdk-8-source clang-3.5 flex asciidoc source-highlight graphviz \
       zlib1g-dev libarchive-dev libncurses-dev uuid-dev libssl-dev \
       ca-certificates-java libcurl4-openssl-dev libmemcached-dev libsasl2-dev && \
     apt-get clean
@@ -40,10 +40,16 @@ RUN wget http://archive.kernel.org/debian-archive/debian/pool/main/b/bison/bison
     dpkg -i /tmp/bison_2.3.deb && \
     rm -f /tmp/bison_2.3.deb
 
+# Go
+RUN wget https://storage.googleapis.com/golang/go1.4.linux-amd64.tar.gz -O /tmp/go.tar.gz && \
+    tar xzf /tmp/go.tar.gz -C /usr/local/ && \
+    rm -f /tmp/go.tar.gz
+ENV PATH=/usr/local/go/bin:$PATH
+
 RUN cd /opt && \
     git clone https://github.com/google/bazel/ && \
     cd bazel && \
-    git checkout 8e36c422255a99c8b3a7aac10b2d105294c7fa64 && \
+    git checkout 53f407608ef6547bd690fa4420418aa6b6991b22 && \
     sed -i '/Building Bazel with Bazel/iexit 0' compile.sh && \
     ./compile.sh compile && \
     ln -s /opt/bazel/output/bazel /usr/bin/

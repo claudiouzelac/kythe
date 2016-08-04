@@ -18,6 +18,7 @@ package indexpack
 
 import (
 	"archive/zip"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -194,6 +195,31 @@ func TestCompilationsRoundTrip(t *testing.T) {
 	}
 }
 
+func TestDefaultUnitType(t *testing.T) {
+	if testArchive == nil {
+		t.Fatal("No test archive is present; test cannot proceed")
+	}
+
+	// Test plan: Open the existing pack without a unit type set, and read out
+	// the compilations.  Each should be delivered with the default type.
+	ctx := context.Background()
+	path := testArchive.Root()
+	pack, err := Open(ctx, path) // no unit type specified
+	if err != nil {
+		t.Fatalf("Unable to create index pack %q: %v", path, err)
+	}
+	t.Logf("Opened index pack: %#v", pack)
+
+	if err := pack.ReadUnits(ctx, "kythe", func(digest string, unit interface{}) error {
+		if _, ok := unit.(*json.RawMessage); !ok {
+			return fmt.Errorf("wrong value type for %q: got %T, want *json.RawMessage", digest, unit)
+		}
+		return nil
+	}); err != nil {
+		t.Errorf("Reading stored compilations failed: %v", err)
+	}
+}
+
 func TestFilesRoundTrip(t *testing.T) {
 	if testArchive == nil {
 		t.Fatal("No test archive is present; test cannot proceed")
@@ -320,8 +346,12 @@ func TestZipReader(t *testing.T) {
 		t.Fatalf("Error opening zip file: %v", err)
 	}
 	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		t.Fatalf("Error getting zip file size: %v", err)
+	}
 
-	pack, err := OpenZip(ctx, f, UnitType((*cpb.CompilationUnit)(nil)))
+	pack, err := OpenZip(ctx, f, fi.Size(), UnitType((*cpb.CompilationUnit)(nil)))
 	if err != nil {
 		t.Fatalf("Error opening pack %q: %v", root, err)
 	}
@@ -359,7 +389,7 @@ func TestZipErrors(t *testing.T) {
 
 	// Opening an empty archive should report an error.
 	empty := strings.NewReader("")
-	if pack, err := OpenZip(ctx, empty); err == nil {
+	if pack, err := OpenZip(ctx, empty, 0); err == nil {
 		t.Errorf("Opening empty zip: got %+v, wanted error", pack)
 	}
 
@@ -370,8 +400,12 @@ func TestZipErrors(t *testing.T) {
 		t.Fatalf("Error opening zip file: %v", err)
 	}
 	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		t.Fatalf("Error getting zip file size: %v", err)
+	}
 
-	pack, err := OpenZip(ctx, f)
+	pack, err := OpenZip(ctx, f, fi.Size())
 	if err != nil {
 		t.Fatalf("Error opening pack %q: %v", root, err)
 	}

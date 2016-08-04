@@ -21,41 +21,55 @@ package main
 import (
 	"flag"
 	"log"
-	"runtime"
 
+	"kythe.io/kythe/go/platform/vfs"
 	"kythe.io/kythe/go/services/graphstore"
 	"kythe.io/kythe/go/serving/pipeline"
 	"kythe.io/kythe/go/storage/gsutil"
 	"kythe.io/kythe/go/storage/leveldb"
+	"kythe.io/kythe/go/storage/stream"
+	"kythe.io/kythe/go/util/datasize"
 	"kythe.io/kythe/go/util/flagutil"
 	"kythe.io/kythe/go/util/profile"
 
 	"golang.org/x/net/context"
+
+	spb "kythe.io/kythe/proto/storage_proto"
 
 	_ "kythe.io/kythe/go/services/graphstore/grpc"
 	_ "kythe.io/kythe/go/services/graphstore/proxy"
 )
 
 var (
-	gs graphstore.Service
+	gs          graphstore.Service
+	entriesFile = flag.String("entries", "", "Path to GraphStore-ordered entries file (mutually exclusive with --graphstore)")
 
 	tablePath = flag.String("out", "", "Directory path to output serving table")
 
-	maxEdgePageSize = flag.Int("max_edge_page_size", 4000, "If positive, edge pages are restricted to under this size")
+	maxPageSize = flag.Int("max_page_size", 4000,
+		"If positive, edge/cross-reference pages are restricted to under this number of edges/references")
+	compressShards = flag.Bool("compress_shards", false,
+		"Determines whether intermediate data written to disk should be compressed.")
+	maxShardSize = flag.Int("max_shard_size", 32000,
+		"Maximum number of elements (edges, decoration fragments, etc.) to keep in-memory before flushing an intermediary data shard to disk.")
+	shardIOBufferSize = datasize.Flag("shard_io_buffer", "16KiB",
+		"Size of the reading/writing buffers for the intermediary data shards.")
+
+	verbose = flag.Bool("verbose", false, "Whether to emit extra, and possibly excessive, log messages")
 )
 
 func init() {
-	if runtime.GOMAXPROCS(0) == 1 {
-		runtime.GOMAXPROCS(runtime.NumCPU())
-	}
-	gsutil.Flag(&gs, "graphstore", "GraphStore to read")
-	flag.Usage = flagutil.SimpleUsage("Creates a combined xrefs/filetree/search serving table based on a given GraphStore",
-		"--graphstore spec --out path")
+	gsutil.Flag(&gs, "graphstore", "GraphStore to read (mutually exclusive with --entries)")
+	flag.Usage = flagutil.SimpleUsage(
+		"Creates a combined xrefs/filetree/search serving table based on a given GraphStore or stream of GraphStore-ordered entries",
+		"(--graphstore spec | --entries path) --out path")
 }
 func main() {
 	flag.Parse()
-	if gs == nil {
-		flagutil.UsageError("missing required --graphstore flag")
+	if gs == nil && *entriesFile == "" {
+		flagutil.UsageError("missing --graphstore or --entries")
+	} else if gs != nil && *entriesFile != "" {
+		flagutil.UsageError("--graphstore and --entries are mutually exclusive")
 	} else if *tablePath == "" {
 		flagutil.UsageError("missing required --out flag")
 	}
@@ -73,8 +87,27 @@ func main() {
 	}
 	defer profile.Stop()
 
-	if err := pipeline.Run(ctx, gs, db, &pipeline.Options{
-		MaxEdgePageSize: *maxEdgePageSize,
+	var rd stream.EntryReader
+	if gs != nil {
+		rd = func(f func(e *spb.Entry) error) error {
+			defer gs.Close(ctx)
+			return gs.Scan(ctx, &spb.ScanRequest{}, f)
+		}
+	} else {
+		f, err := vfs.Open(ctx, *entriesFile)
+		if err != nil {
+			log.Fatalf("Error opening %q: %v", *entriesFile, err)
+		}
+		defer f.Close()
+		rd = stream.NewReader(f)
+	}
+
+	if err := pipeline.Run(ctx, rd, db, &pipeline.Options{
+		Verbose:        *verbose,
+		MaxPageSize:    *maxPageSize,
+		CompressShards: *compressShards,
+		MaxShardSize:   *maxShardSize,
+		IOBufferSize:   int(shardIOBufferSize.Bytes()),
 	}); err != nil {
 		log.Fatal("FATAL ERROR: ", err)
 	}

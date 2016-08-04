@@ -13,7 +13,7 @@ public class Selectors {
       //- @maybe ref Param
       //- @get ref GetMethod
       //- @field ref Field
-      //- @this ref ThisM
+      //- @this ref This
       this.field = maybe.get();
     }
     //- @this ref This
@@ -27,6 +27,12 @@ public class Selectors {
     //- @field ref Field
     //- @this ref This
     return this.field;
+  }
+
+  //- @String ref String
+  //- @"java.lang" ref JavaLangPackage
+  java.lang.String m3() {
+    return null;
   }
 
   //- @Optional defines/binding Optional

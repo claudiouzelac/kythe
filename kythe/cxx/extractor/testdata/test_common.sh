@@ -13,12 +13,14 @@
 # limitations under the License.
 # Define TEST_NAME, then include as part of an extractor test.
 # TODO(zarko): lift this script out for use in other test suites.
-BASE_DIR="$TEST_SRCDIR/kythe/cxx/extractor/testdata"
+BASE_DIR="$PWD/kythe/cxx/extractor/testdata"
 OUT_DIR="$TEST_TMPDIR"
 mkdir -p "${OUT_DIR}"
-EXTRACTOR="$PWD/kythe/cxx/extractor/cxx_extractor"
-KINDEX_TOOL="$PWD/kythe/cxx/tools/kindex_tool"
-VERIFIER="$PWD/kythe/cxx/verifier/verifier"
-INDEXER="$PWD/kythe/cxx/indexer/cxx/indexer"
-INDEXPACK="$PWD/kythe/go/platform/tools/indexpack"
-PF_SUFFIX=$(if [[ $(uname) == 'Darwin' ]]; then echo '.Darwin'; fi)
+# This needs to be relative (or else it must be fixed up in the resulting
+# compilation units) because the extractor stores its invocation path in its
+# output.
+EXTRACTOR="./kythe/cxx/extractor/cxx_extractor"
+KINDEX_TOOL="${PWD}/kythe/cxx/tools/kindex_tool"
+VERIFIER="${PWD}/kythe/cxx/verifier/verifier"
+INDEXER="${PWD}/kythe/cxx/indexer/cxx/indexer"
+INDEXPACK="${PWD}/kythe/go/platform/tools/indexpack/indexpack"

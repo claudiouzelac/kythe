@@ -69,9 +69,12 @@ Example:
     }
 
     for (const auto &rule_file : rule_files) {
+      if (rule_file.empty()) {
+        continue;
+      }
       if (!v.LoadInlineRuleFile(rule_file)) {
         fprintf(stderr, "Failed loading %s.\n", rule_file.c_str());
-        return 1;
+        return 2;
       }
     }
   }

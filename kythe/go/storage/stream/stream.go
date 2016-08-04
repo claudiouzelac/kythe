@@ -19,6 +19,7 @@ package stream
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 
@@ -27,23 +28,41 @@ import (
 	spb "kythe.io/kythe/proto/storage_proto"
 )
 
+// EntryReader functions read a stream of entries, passing each to a handler
+// function.
+type EntryReader func(func(*spb.Entry) error) error
+
 // ReadEntries reads a stream of Entry protobufs from r.
 func ReadEntries(r io.Reader) <-chan *spb.Entry {
 	ch := make(chan *spb.Entry)
 	go func() {
 		defer close(ch)
+		if err := NewReader(r)(func(e *spb.Entry) error {
+			ch <- e
+			return nil
+		}); err != nil {
+			log.Fatal(err)
+		}
+	}()
+	return ch
+}
+
+// NewReader reads a stream of Entry protobufs from r.
+func NewReader(r io.Reader) EntryReader {
+	return func(f func(*spb.Entry) error) error {
 		rd := delimited.NewReader(r)
 		for {
 			var entry spb.Entry
 			if err := rd.NextProto(&entry); err == io.EOF {
-				break
+				return nil
 			} else if err != nil {
-				log.Fatalf("Error decoding Entry: %v", err)
+				return fmt.Errorf("error decoding Entry: %v", err)
 			}
-			ch <- &entry
+			if err := f(&entry); err != nil {
+				return err
+			}
 		}
-	}()
-	return ch
+	}
 }
 
 // ReadJSONEntries reads a JSON stream of Entry protobufs from r.
@@ -51,16 +70,30 @@ func ReadJSONEntries(r io.Reader) <-chan *spb.Entry {
 	ch := make(chan *spb.Entry)
 	go func() {
 		defer close(ch)
+		if err := NewJSONReader(r)(func(e *spb.Entry) error {
+			ch <- e
+			return nil
+		}); err != nil {
+			log.Fatal(err)
+		}
+	}()
+	return ch
+}
+
+// NewJSONReader reads a JSON stream of Entry protobufs from r.
+func NewJSONReader(r io.Reader) EntryReader {
+	return func(f func(*spb.Entry) error) error {
 		de := json.NewDecoder(r)
 		for {
 			var entry spb.Entry
 			if err := de.Decode(&entry); err == io.EOF {
-				break
+				return nil
 			} else if err != nil {
-				log.Fatalf("Error decoding Entry: %v", err)
+				return fmt.Errorf("error decoding JSON Entry: %v", err)
 			}
-			ch <- &entry
+			if err := f(&entry); err != nil {
+				return err
+			}
 		}
-	}()
-	return ch
+	}
 }

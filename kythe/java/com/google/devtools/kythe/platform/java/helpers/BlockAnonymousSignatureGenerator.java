@@ -30,39 +30,37 @@ import com.sun.tools.javac.tree.JCTree;
 import com.sun.tools.javac.tree.JCTree.JCBlock;
 import com.sun.tools.javac.tree.JCTree.JCClassDecl;
 import com.sun.tools.javac.tree.JCTree.JCMethodDecl;
-
 import java.util.HashMap;
 import java.util.Map;
-
 import javax.lang.model.element.Element;
 
 /**
- *  This class is responsible for generating signatures for blocks and anonymous classes.
- *  The maps used for caching in this class are specific through out the life of analyzer and
- *  they can be used for one or more compilation units which are part of one compilation context.
+ * This class is responsible for generating signatures for blocks and anonymous classes. The maps
+ * used for caching in this class are specific through out the life of analyzer and they can be used
+ * for one or more compilation units which are part of one compilation context.
  */
 public class BlockAnonymousSignatureGenerator
     extends TreeScanner<Void, BlockAnonymousSignatureGenerator.BlockAnonymousData> {
   // Blocks are numbered sequentially from zero within a class scope or a method scope.
   // Here is an example of block numbering:
   /*
-  class A {// block 0
-    {// block 1
-      {// block 2
-      }
-    }
-    {// block 3
-    }
-    void method() {// block 0
-      {// block 1
-      }
-      if (true) {// block 2
+   class A {// block 0
+   {// block 1
+   {// block 2
+   }
+   }
+   {// block 3
+   }
+   void method() {// block 0
+   {// block 1
+   }
+   if (true) {// block 2
 
-      } else {// block 3
-      }
-    }
-  }
-  */
+   } else {// block 3
+   }
+   }
+   }
+   */
 
   static class BlockAnonymousData {
     int blockNumber;
@@ -78,9 +76,6 @@ public class BlockAnonymousSignatureGenerator
 
   private final SignatureGenerator signatureGenerator;
 
-  /**
-   * @param signatureGenerator
-   */
   BlockAnonymousSignatureGenerator(SignatureGenerator signatureGenerator) {
     this.signatureGenerator = signatureGenerator;
   }
@@ -171,8 +166,7 @@ public class BlockAnonymousSignatureGenerator
     JCMethodDecl methodDecl = (JCMethodDecl) methodTree;
     StringBuilder methodSignature = new StringBuilder();
     methodDecl.sym.accept(signatureGenerator, methodSignature);
-    return super.visitMethod(methodTree,
-        new BlockAnonymousData(-1, 0, methodSignature.toString()));
+    return super.visitMethod(methodTree, new BlockAnonymousData(-1, 0, methodSignature.toString()));
   }
 
   @Override
@@ -186,8 +180,8 @@ public class BlockAnonymousSignatureGenerator
       anonymousClassSignature.append(blockData.anonymousNumber);
       blockAnonymousMap.put(classDecl, anonymousClassSignature.toString());
       blockData.anonymousNumber++;
-      return super.visitClass(classTree,
-          new BlockAnonymousData(0, 0, blockAnonymousMap.get(classDecl)));
+      return super.visitClass(
+          classTree, new BlockAnonymousData(0, 0, blockAnonymousMap.get(classDecl)));
     } else {
       StringBuilder classSignature = new StringBuilder();
       classDecl.sym.accept(this.signatureGenerator, classSignature);
@@ -196,10 +190,10 @@ public class BlockAnonymousSignatureGenerator
   }
 
   @Override
-  public Void visitEnhancedForLoop(EnhancedForLoopTree enhancedForLoopTree,
-      BlockAnonymousData blockData) {
-    blockAnonymousMap.put(enhancedForLoopTree,
-        blockData.topLevelSignature + ".{}" + (blockData.blockNumber + 1));
+  public Void visitEnhancedForLoop(
+      EnhancedForLoopTree enhancedForLoopTree, BlockAnonymousData blockData) {
+    blockAnonymousMap.put(
+        enhancedForLoopTree, blockData.topLevelSignature + ".{}" + (blockData.blockNumber + 1));
     if (enhancedForLoopTree.getStatement().getKind() != Tree.Kind.BLOCK) {
       blockData.blockNumber++;
     }
@@ -208,19 +202,18 @@ public class BlockAnonymousSignatureGenerator
 
   @Override
   public Void visitForLoop(ForLoopTree forLoopTree, BlockAnonymousData blockData) {
-    blockAnonymousMap.put(forLoopTree,
-        blockData.topLevelSignature + ".{}" + (blockData.blockNumber + 1));
+    blockAnonymousMap.put(
+        forLoopTree, blockData.topLevelSignature + ".{}" + (blockData.blockNumber + 1));
     if (forLoopTree.getStatement().getKind() != Tree.Kind.BLOCK) {
       blockData.blockNumber++;
     }
     return super.visitForLoop(forLoopTree, blockData);
   }
 
-
   @Override
   public Void visitCatch(CatchTree catchTree, BlockAnonymousData blockData) {
-    blockAnonymousMap.put(catchTree,
-        blockData.topLevelSignature + ".{}" + (blockData.blockNumber + 1));
+    blockAnonymousMap.put(
+        catchTree, blockData.topLevelSignature + ".{}" + (blockData.blockNumber + 1));
     return super.visitCatch(catchTree, blockData);
   }
 
@@ -229,8 +222,8 @@ public class BlockAnonymousSignatureGenerator
     blockData.blockNumber++;
     JCBlock block = (JCBlock) b;
     blockAnonymousMap.put(block, blockData.topLevelSignature + ".{}" + blockData.blockNumber);
-    BlockAnonymousData newBlockAnonymousData = new BlockAnonymousData(blockData.blockNumber, 0,
-        blockData.topLevelSignature);
+    BlockAnonymousData newBlockAnonymousData =
+        new BlockAnonymousData(blockData.blockNumber, 0, blockData.topLevelSignature);
     super.visitBlock(block, newBlockAnonymousData);
     blockData.blockNumber = newBlockAnonymousData.blockNumber;
     return null;

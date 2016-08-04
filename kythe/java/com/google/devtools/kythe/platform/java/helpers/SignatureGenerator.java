@@ -17,19 +17,15 @@
 package com.google.devtools.kythe.platform.java.helpers;
 
 import com.google.common.base.Optional;
-import com.google.common.collect.Maps;
-import com.google.common.collect.Sets;
-
+import com.google.devtools.kythe.common.FormattingLogger;
 import com.sun.source.tree.CompilationUnitTree;
 import com.sun.source.util.TreePath;
-import com.sun.tools.javac.api.JavacTrees;
 import com.sun.tools.javac.code.BoundKind;
 import com.sun.tools.javac.code.Symbol;
 import com.sun.tools.javac.code.Symbol.MethodSymbol;
 import com.sun.tools.javac.code.Symbol.TypeSymbol;
 import com.sun.tools.javac.code.Symbol.TypeVariableSymbol;
 import com.sun.tools.javac.code.Type;
-import com.sun.tools.javac.code.Type.AnnotatedType;
 import com.sun.tools.javac.code.Type.ArrayType;
 import com.sun.tools.javac.code.Type.CapturedType;
 import com.sun.tools.javac.code.Type.ClassType;
@@ -42,11 +38,11 @@ import com.sun.tools.javac.code.Type.UndetVar;
 import com.sun.tools.javac.code.Type.Visitor;
 import com.sun.tools.javac.code.Type.WildcardType;
 import com.sun.tools.javac.util.Context;
-
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-
 import javax.lang.model.element.Element;
 import javax.lang.model.element.ElementKind;
 import javax.lang.model.element.ElementVisitor;
@@ -59,50 +55,43 @@ import javax.lang.model.element.VariableElement;
 import javax.lang.model.type.TypeKind;
 
 /**
- * This class is responsible for generating signatures for elements in a Java program.
- * The class is valid to use for a single compilation context. A compilation context may contain
- * many compilation units (files). Since, this class might keep references to items in compilation
- * units, users of this class must make sure that they use this class local to a compilation task.
- * That is to make sure that after each compilation task is over the memory for the compilation
- * units are garbage collected properly.
- * Here is an example usage of this class:
+ * This class is responsible for generating signatures for elements in a Java program. The class is
+ * valid to use for a single compilation context. A compilation context may contain many compilation
+ * units (files). Since, this class might keep references to items in compilation units, users of
+ * this class must make sure that they use this class local to a compilation task. That is to make
+ * sure that after each compilation task is over the memory for the compilation units are garbage
+ * collected properly. Here is an example usage of this class:
  *
- *    CompilationTask task =
- *        compiler.getTask(null, standardFileManager,
- *            diagnosticsCollector, options, null, sourceFiles);
- *    JavacTaskImpl javacTask = (JavacTaskImpl) task;
- *    SignatureGenerator signatureGenerator = new SignatureGenerator(javacTask.getContext());
+ * <p>CompilationTask task = compiler.getTask(null, standardFileManager, diagnosticsCollector,
+ * options, null, sourceFiles); JavacTaskImpl javacTask = (JavacTaskImpl) task; SignatureGenerator
+ * signatureGenerator = new SignatureGenerator(javacTask.getContext());
  *
- * For more information see the corresponding test directory for this class.
- *
+ * <p>For more information see the corresponding test directory for this class.
  */
 public class SignatureGenerator
     implements ElementVisitor<Void, StringBuilder>, Visitor<Void, StringBuilder> {
+  private static final FormattingLogger logger =
+      FormattingLogger.getLogger(SignatureGenerator.class);
 
   static final String ANONYMOUS = "/anonymous";
 
   // Constant used to prepend to the beginning of error type names.
   private static final String ERROR_TYPE = "ERROR-TYPE";
 
-  private final JavacTrees javacTrees;
-
   private final BlockAnonymousSignatureGenerator blockNumber =
       new BlockAnonymousSignatureGenerator(this);
 
   // This map is used to store the signature of all the visited types.
-  private final Map<Type, String> visitedTypes = Maps.<Type, String>newHashMap();
+  private final Map<Type, String> visitedTypes = new HashMap<>();
 
   // This map is used to store the signature of all the visited elements.
   // It also helps us resolve the curiously-recurring template pattern.
-  private final Map<Element, String> visitedElements = Maps.<Element, String>newHashMap();
+  private final Map<Element, String> visitedElements = new HashMap<>();
 
   // The set of type variables which are bounded in  method or class declaration.
   // This set is used to avoid infinite recursion when the type parameter is used in the signature
   // of the method or class.
-  private final Set<TypeVar> boundedVars = Sets.newHashSet();
-
-  // Compilation unit for which we want to get the signatures.
-  private final CompilationUnitTree compilationUnit;
+  private final Set<TypeVar> boundedVars = new HashSet<>();
 
   private final MemoizedTreePathScanner memoizedTreePathScanner;
 
@@ -118,8 +107,6 @@ public class SignatureGenerator
   }
 
   public SignatureGenerator(CompilationUnitTree compilationUnit, Context context) {
-    this.javacTrees = JavacTrees.instance(context);
-    this.compilationUnit = compilationUnit;
     this.memoizedTreePathScanner = new MemoizedTreePathScanner(compilationUnit, context);
   }
 
@@ -137,8 +124,8 @@ public class SignatureGenerator
       }
       return Optional.of(sb.toString());
     } catch (Throwable e) {
-      // In case something unexpected happened during signature generation we do not want to
-      // fail.
+      // In case something unexpected happened during signature generation we do not want to fail.
+      logger.warning(new RuntimeException("Failure generating signature for " + symbol, e), "");
       return Optional.absent();
     }
   }
@@ -225,10 +212,10 @@ public class SignatureGenerator
   }
 
   //////////////////////////// helper functions ////////////////////////////
-  private void visitTypeParameters(List<? extends TypeParameterElement> typeParams,
-      StringBuilder sb) {
+  private void visitTypeParameters(
+      List<? extends TypeParameterElement> typeParams, StringBuilder sb) {
     if (!typeParams.isEmpty()) {
-      Set<TypeVar> typeVars = Sets.newHashSet();
+      Set<TypeVar> typeVars = new HashSet<>();
       for (TypeParameterElement aType : typeParams) {
         typeVars.add((TypeVar) ((TypeSymbol) aType).type);
       }
@@ -322,7 +309,7 @@ public class SignatureGenerator
               }
             }
           } else {
-            if (!extendsType.tsym.getQualifiedName().toString().equals(Object.class.getName())) {
+            if (!extendsType.tsym.getQualifiedName().contentEquals(Object.class.getName())) {
               sb.append(" extends ");
               extendsType.accept(this, sb);
             }
@@ -481,11 +468,5 @@ public class SignatureGenerator
     e.getEnclosingElement().accept(this, sb);
     sb.append(".").append(e.getEnclosingElement().getSimpleName()).append("()");
     return null;
-  }
-
-  @Override
-  public Void visitAnnotatedType(AnnotatedType t, StringBuilder sb) {
-    // TODO: java 8.
-    throw new IllegalStateException();
   }
 }

@@ -17,9 +17,15 @@ cc_binary(
     deps = ["//third_party/proto:libprotoc"],
 )
 
-java_library(
+java_import(
     name = "grpc-java",
-    srcs = ["grpc-all-0.8.0.jar"],
+    jars = [
+        "grpc-core-1.0.0-pre1.jar",
+        "grpc-stub-1.0.0-pre1.jar",
+        "grpc-netty-1.0.0-pre1.jar",
+        "grpc-protobuf-1.0.0-pre1.jar",
+        "grpc-protobuf-lite-1.0.0-pre1.jar",
+    ],
     runtime_deps = [
         "//third_party/hpack",
         "//third_party/netty",

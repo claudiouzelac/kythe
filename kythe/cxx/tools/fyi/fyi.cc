@@ -16,19 +16,19 @@
 
 #include "fyi.h"
 
-#include "clang/Rewrite/Core/Rewriter.h"
-#include "clang/Lex/Preprocessor.h"
 #include "clang/Frontend/ASTUnit.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Frontend/TextDiagnosticPrinter.h"
+#include "clang/Lex/Preprocessor.h"
 #include "clang/Parse/ParseAST.h"
+#include "clang/Rewrite/Core/Rewriter.h"
 #include "clang/Sema/ExternalSemaSource.h"
 #include "clang/Sema/Sema.h"
+#include "kythe/cxx/common/kythe_uri.h"
+#include "kythe/cxx/common/proto_conversions.h"
 #include "llvm/Support/Timer.h"
 #include "llvm/Support/raw_ostream.h"
 #include "third_party/llvm/src/clang_builtin_headers.h"
-#include "kythe/cxx/common/kythe_uri.h"
-#include "kythe/cxx/common/proto_conversions.h"
 
 namespace kythe {
 namespace fyi {
@@ -133,7 +133,6 @@ class FileTracker {
     store->clear();
     llvm::raw_svector_ostream buffer_stream(*store);
     buffer->write(buffer_stream);
-    buffer_stream.flush();
     // Required null terminator.
     store->push_back(0);
     const char *start = store->data();
@@ -353,10 +352,10 @@ class Action : public clang::ASTFrontendAction,
   /// \return false if no tickets were copied
   template <typename Reply, typename Request>
   bool CopyTicketsFromEdgeSets(const Reply &reply, Request *request) {
-    for (const auto &edge_set : reply.edge_set()) {
-      for (const auto &group : edge_set.group()) {
-        for (const auto &ticket : group.target_ticket()) {
-          request->add_ticket(ticket);
+    for (const auto &edge_set : reply.edge_sets()) {
+      for (const auto &group : edge_set.second.groups()) {
+        for (const auto &edge : group.second.edge()) {
+          request->add_ticket(edge.target_ticket());
         }
       }
     }
@@ -367,18 +366,18 @@ class Action : public clang::ASTFrontendAction,
   /// this Action's `FileTracker`'s include list.
   template <typename Reply>
   void AddFileNodesToTracker(const Reply &reply) {
-    for (const auto &parent : reply.node()) {
+    for (const auto &parent : reply.nodes()) {
       bool is_file = false;
-      for (const auto &fact : parent.fact()) {
-        if (fact.name() == "/kythe/node/kind") {
-          is_file = (fact.value() == "/kythe/node/file");
+      for (const auto &fact : parent.second.facts()) {
+        if (fact.first == "/kythe/node/kind") {
+          is_file = (fact.second == "/kythe/node/file");
           break;
         }
       }
       if (!is_file) {
         continue;
       }
-      auto maybe_uri = URI::FromString(parent.ticket());
+      auto maybe_uri = URI::FromString(parent.first);
       if (maybe_uri.first) {
         tracker_->TryInclude(maybe_uri.second.v_name().path());
       }
@@ -395,32 +394,18 @@ class Action : public clang::ASTFrontendAction,
     // Conservatively assume that something went wrong if we had to invoke
     // typo correction.
     tracker_->pass_had_errors_ = true;
-    // Look for any name nodes that could help. We'll batch up several
-    // name node requests to send out at once and see what sticks.
-    proto::VName unqualified_name;
-    proto::SearchRequest name_search_request;
-    name_search_request.mutable_partial()->set_signature(
-        ToStringRef(typo.getAsString() + "#n"));
-    proto::SearchReply name_search_reply;
-    std::string error_text;
-    // Ideally we could use prefix search here, but for the moment we'll
-    // look for exact matches on the signature.
-    if (!factory_.xrefs_->Search(name_search_request, &name_search_reply,
-                                 &error_text)) {
-      fprintf(stderr, "Xrefs error: %s\n", error_text.c_str());
-      return clang::TypoCorrection();
-    }
+    // Look for any name nodes that could help.
+    proto::VName name_node;
+    name_node.set_signature(typo.getAsString() + "#n");
+    name_node.set_language("c++");
     proto::EdgesRequest named_edges_request;
-    for (const auto &ticket : name_search_reply.ticket()) {
-      named_edges_request.add_ticket(ticket);
-    }
-    if (named_edges_request.ticket_size() == 0) {
-      return clang::TypoCorrection();
-    }
+    auto name_uri = URI(name_node).ToString();
+    named_edges_request.add_ticket(name_uri);
     // We've found at least one interesting name in the graph. Now we need
     // to figure out which nodes those names are bound to.
     named_edges_request.add_kind(ToStringRef("%/kythe/edge/named"));
     proto::EdgesReply named_edges_reply;
+    std::string error_text;
     if (!factory_.xrefs_->Edges(named_edges_request, &named_edges_reply,
                                 &error_text)) {
       fprintf(stderr, "Xrefs error (named): %s\n", error_text.c_str());

@@ -8,9 +8,9 @@ java_library(
         "Span.java",
     ],
     deps = [
+        "//external:guava",
+        "//external:proto/protobuf_java",
         "//kythe/proto:storage_proto_java",
-        "//third_party/guava",
-        "//third_party/proto:protobuf_java",
     ],
 )
 
@@ -20,9 +20,9 @@ java_library(
         "JsonUtil.java",
     ],
     deps = [
-        "//third_party/gson",
-        "//third_party/gson:proto",
-        "//third_party/guava",
-        "//third_party/proto:protobuf_java",
+        "//external:gson",
+        "//external:gson/proto",
+        "//external:guava",
+        "//external:proto/protobuf_java",
     ],
 )

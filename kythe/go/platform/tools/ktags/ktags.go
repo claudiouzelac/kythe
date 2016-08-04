@@ -25,21 +25,21 @@ import (
 	"strconv"
 	"strings"
 
-	"kythe.io/kythe/go/services/search"
 	"kythe.io/kythe/go/services/xrefs"
 	"kythe.io/kythe/go/util/flagutil"
+	"kythe.io/kythe/go/util/kytheuri"
 	"kythe.io/kythe/go/util/schema"
 	"kythe.io/kythe/go/util/stringset"
 
 	"golang.org/x/net/context"
 
-	spb "kythe.io/kythe/proto/storage_proto"
 	xpb "kythe.io/kythe/proto/xref_proto"
 )
 
 var (
 	ctx = context.Background()
 
+	corpus    = flag.String("corpus", "", "Corpus of the given files")
 	remoteAPI = flag.String("api", "https://xrefs-dot-kythe-repo.appspot.com", "Remote api server")
 )
 
@@ -59,26 +59,9 @@ func main() {
 	}
 
 	xs := xrefs.WebClient(*remoteAPI)
-	idx := search.WebClient(*remoteAPI)
 
 	for _, file := range flag.Args() {
-		results, err := idx.Search(ctx, &spb.SearchRequest{
-			Partial: &spb.VName{Path: file},
-			Fact: []*spb.SearchRequest_Fact{{
-				Name:  schema.NodeKindFact,
-				Value: []byte(schema.FileKind),
-			}},
-		})
-		if err != nil {
-			log.Fatalf("Error searching for ticket of file %q", file)
-		} else if len(results.Ticket) == 0 {
-			log.Printf("Could not find ticket for file %q", file)
-			continue
-		} else if len(results.Ticket) != 1 {
-			log.Printf("Multiple tickets found for file %q; choosing first from %v", file, results.Ticket)
-		}
-
-		ticket := results.Ticket[0]
+		ticket := (&kytheuri.URI{Corpus: *corpus, Path: file}).String()
 		decor, err := xs.Decorations(ctx, &xpb.DecorationsRequest{
 			Location:   &xpb.Location{Ticket: ticket},
 			SourceText: true,
@@ -88,7 +71,7 @@ func main() {
 			log.Fatalf("Failed to get decorations for file %q", file)
 		}
 
-		nodes := xrefs.NodesMap(decor.Node)
+		nodes := xrefs.NodesMap(decor.Nodes)
 		emitted := stringset.New()
 
 		for _, r := range decor.Reference {
@@ -125,14 +108,14 @@ func getTagFields(xs xrefs.Service, ticket string) ([]string, error) {
 		Kind:   []string{schema.ChildOfEdge, schema.ParamEdge},
 		Filter: []string{schema.NodeKindFact, schema.SubkindFact, identifierFact},
 	})
-	if err != nil || len(reply.EdgeSet) == 0 {
+	if err != nil || len(reply.EdgeSets) == 0 {
 		return nil, err
 	}
 
 	var fields []string
 
-	nodes := xrefs.NodesMap(reply.Node)
-	edges := xrefs.EdgesMap(reply.EdgeSet)
+	nodes := xrefs.NodesMap(reply.Nodes)
+	edges := xrefs.EdgesMap(reply.EdgeSets)
 
 	switch string(nodes[ticket][schema.NodeKindFact]) + "|" + string(nodes[ticket][schema.SubkindFact]) {
 	case schema.FunctionKind + "|":
@@ -148,7 +131,7 @@ func getTagFields(xs xrefs.Service, ticket string) ([]string, error) {
 		fields = append(fields, "v")
 	}
 
-	for _, parent := range edges[ticket][schema.ChildOfEdge] {
+	for parent := range edges[ticket][schema.ChildOfEdge] {
 		parentIdent := string(nodes[parent][identifierFact])
 		if parentIdent == "" {
 			continue

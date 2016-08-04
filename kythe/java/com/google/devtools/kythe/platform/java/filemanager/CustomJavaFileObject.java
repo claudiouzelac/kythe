@@ -17,21 +17,25 @@
 package com.google.devtools.kythe.platform.java.filemanager;
 
 import com.google.devtools.kythe.platform.shared.FileDataProvider;
-
+import java.nio.charset.Charset;
 import javax.lang.model.element.Modifier;
 import javax.lang.model.element.NestingKind;
 import javax.tools.JavaFileObject;
 
-/**
- * JavaFileObject that can be provided a body at a future time.
- */
+/** JavaFileObject that can be provided a body at a future time. */
+@com.sun.tools.javac.api.ClientCodeWrapper.Trusted
 public class CustomJavaFileObject extends CustomFileObject implements JavaFileObject {
 
   private final String className;
   private Kind kind;
 
-  public CustomJavaFileObject(FileDataProvider contentProvider,
-      String path, String digest, String className, Kind kind, String encoding) {
+  public CustomJavaFileObject(
+      FileDataProvider contentProvider,
+      String path,
+      String digest,
+      String className,
+      Kind kind,
+      Charset encoding) {
     super(contentProvider, path, digest, encoding);
     this.className = className;
     this.kind = kind;
@@ -51,6 +55,7 @@ public class CustomJavaFileObject extends CustomFileObject implements JavaFileOb
   public NestingKind getNestingKind() {
     return null;
   }
+
   @Override
   public Modifier getAccessLevel() {
     return null;

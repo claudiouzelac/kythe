@@ -1,11 +1,12 @@
 package(default_visibility = ["//kythe:default_visibility"])
 
-load("/tools/build_rules/proto", "proto_library")
+load("//tools:build_rules/proto.bzl", "proto_library")
 
 filegroup(
     name = "public",
     srcs = [
         "analysis.proto",
+        "common.proto",
         "cxx.proto",
         "filetree.proto",
         "java.proto",
@@ -14,6 +15,14 @@ filegroup(
     ],
 )
 
+# Common Kythe protocol buffer definitions shared among other libraries
+proto_library(
+    name = "common_proto",
+    gen_cc = 1,
+    gen_go = 1,
+)
+
+# Public Kythe GraphStore service API and analyzer output format
 proto_library(
     name = "storage_proto",
     has_services = 1,
@@ -26,6 +35,7 @@ proto_library(
     ],
 )
 
+# Public Kythe analyzer and file data service APIs
 proto_library(
     name = "analysis_proto",
     has_services = 1,
@@ -38,26 +48,37 @@ proto_library(
     ],
     deps = [
         ":storage_proto",
-        "//third_party/proto:any_proto",
+        "//external:proto/any_proto",
     ],
 )
 
+# C++-specific protocol buffer definitions
 proto_library(
     name = "cxx_proto",
     gen_cc = 1,
 )
 
+# Java-specific protocol buffer definitions
 proto_library(
     name = "java_proto",
     gen_java = 1,
 )
 
+# Kythe claiming message definitions
 proto_library(
     name = "claim_proto",
     gen_cc = 1,
     deps = [":storage_proto"],
 )
 
+# Public Kythe filetree service API
+proto_library(
+    name = "filetree_proto",
+    has_services = 1,
+    gen_go = 1,
+)
+
+# Public Kythe xref service API
 proto_library(
     name = "xref_proto",
     has_services = 1,
@@ -65,14 +86,22 @@ proto_library(
     gen_go = 1,
 )
 
+# Protocol buffer definitions used to encode serving data
+# WARNING: These should not be exposed to clients.
 proto_library(
     name = "serving_proto",
-    has_services = 1,
+    gen_cc = 1,
     gen_go = 1,
+    deps = [":common_proto"],
 )
 
+# Protocol buffer definitions internal only to the Kythe libraries and tools.
+# WARNING: These should not be exposed to clients.
 proto_library(
-    name = "filetree_proto",
-    has_services = 1,
+    name = "internal_proto",
     gen_go = 1,
+    deps = [
+        ":common_proto",
+        ":serving_proto",
+    ],
 )

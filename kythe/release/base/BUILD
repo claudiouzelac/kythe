@@ -3,7 +3,7 @@ package(default_visibility = [
     "//kythe/release:__subpackages__",
 ])
 
-load("/tools/build_rules/docker", "docker_build")
+load("//tools:build_rules/docker.bzl", "docker_build")
 
 exports_files(
     ["fix_permissions.sh"],
@@ -12,10 +12,7 @@ exports_files(
 
 docker_build(
     name = "base",
-    src = "Dockerfile",
-    data = [
-        "fix_permissions.sh",
-    ],
+    data = ["fix_permissions.sh"],
     image_name = "google/kythe-base",
     tags = ["manual"],
     use_cache = True,

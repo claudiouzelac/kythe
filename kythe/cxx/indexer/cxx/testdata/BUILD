@@ -4,11 +4,13 @@ load("cxx_indexer_test", "cxx_indexer_test")
 
 sh_test(
     name = "kindex",
+    size = "small",
     srcs = [
         "test_kindex.sh",
     ],
     data = [
         "kindex_repo_test.header",
+        "kindex_repo_test.header2",
         "kindex_repo_test.main",
         "kindex_repo_test.unit",
         "kindex_repo_test.verify",
@@ -24,6 +26,7 @@ sh_test(
 
 sh_test(
     name = "index_pack",
+    size = "small",
     srcs = [
         "test_index_pack.sh",
     ],
@@ -43,23 +46,110 @@ sh_test(
     ],
 )
 
-sh_test(
-    name = "bundle",
-    srcs = [
-        "test_bundle.sh",
-    ],
-    data = [
-        "bundle_self_test.cc",
-        "bundle_self_test_mix.cc",
-        "bundle_self_test_multi_transcript.cc",
-        "bundle_self_test_unclaimed.cc",
-        "bundle_self_test_vnames_json.cc",
-        "claim_macro_features.cc",
-        "test_vnames.json",
-        "//kythe/cxx/extractor:cxx_extractor",
-        "//kythe/cxx/indexer/cxx:indexer",
-        "//kythe/cxx/verifier",
-    ],
+cxx_indexer_test(
+    name = "anonymous_namespace_header",
+    srcs = ["basic/anonymous_namespace_header.cc"],
+    bundled = True,
+    tags = ["basic"],
+)
+
+cxx_indexer_test(
+    name = "anonymous_namespace_inc",
+    srcs = ["basic/anonymous_namespace_inc.cc"],
+    bundled = True,
+    tags = ["basic"],
+)
+
+cxx_indexer_test(
+    name = "anonymous_namespace_transitive_header",
+    srcs = ["basic/anonymous_namespace_transitive_header.cc"],
+    bundled = True,
+    ignore_dups = True,
+    tags = ["basic"],
+)
+
+cxx_indexer_test(
+    name = "anonymous_nested_namespace",
+    srcs = ["basic/anonymous_nested_namespace.cc"],
+    bundled = True,
+    ignore_dups = True,
+    tags = ["basic"],
+)
+
+cxx_indexer_test(
+    name = "anonymous_namespace",
+    srcs = ["basic/anonymous_namespace.cc"],
+    tags = ["basic"],
+)
+
+cxx_indexer_test(
+    name = "anonymous_inline_namespace",
+    srcs = ["basic/anonymous_inline_namespace.cc"],
+    tags = ["basic"],
+)
+
+cxx_indexer_test(
+    name = "bundle_self_test",
+    srcs = ["bundle_self_test.cc"],
+    bundled = True,
+    tags = ["basic"],
+)
+
+cxx_indexer_test(
+    name = "bundle_self_test_mix",
+    srcs = ["bundle_self_test_mix.cc"],
+    bundled = True,
+    tags = ["basic"],
+)
+
+cxx_indexer_test(
+    name = "bundle_self_test_multi_transcript",
+    srcs = ["bundle_self_test_multi_transcript.cc"],
+    bundled = True,
+    ignore_dups = True,
+    tags = ["basic"],
+)
+
+cxx_indexer_test(
+    name = "bundle_self_test_unclaimed",
+    srcs = ["bundle_self_test_unclaimed.cc"],
+    bundled = True,
+    tags = ["basic"],
+)
+
+cxx_indexer_test(
+    name = "bundle_self_test_vnames_json",
+    srcs = ["bundle_self_test_vnames_json.cc"],
+    bundled = True,
+    tags = ["basic"],
+)
+
+cxx_indexer_test(
+    name = "claim_macro_features",
+    srcs = ["claim_macro_features.cc"],
+    bundled = True,
+    tags = ["basic"],
+)
+
+cxx_indexer_test(
+    name = "include_dotdot",
+    srcs = ["include_dotdot.cc"],
+    bundled = True,
+    tags = ["basic"],
+)
+
+cxx_indexer_test(
+    name = "fail_index",
+    srcs = ["test_fail_index.cc"],
+    expect_fail_index = True,
+    tags = ["basic"],
+)
+
+cxx_indexer_test(
+    name = "fail_verify",
+    srcs = ["test_fail_verify.cc"],
+    expect_fail_verify = True,
+    tags = ["basic"],
 )
 
 cxx_indexer_test(
@@ -237,6 +327,12 @@ cxx_indexer_test(
 )
 
 cxx_indexer_test(
+    name = "inline_namespace",
+    srcs = ["basic/inline_namespace.cc"],
+    tags = ["basic"],
+)
+
+cxx_indexer_test(
     name = "macros_builtin",
     srcs = ["basic/macros_builtin.c"],
     std = "c99",
@@ -306,8 +402,49 @@ cxx_indexer_test(
 )
 
 cxx_indexer_test(
-    name = "typedef_class_anon_ns",
-    srcs = ["basic/typedef_class_anon_ns.cc"],
+    name = "namespace",
+    srcs = ["basic/namespace.cc"],
+    tags = ["basic"],
+)
+
+cxx_indexer_test(
+    name = "namespace_contains",
+    srcs = ["basic/namespace_contains.cc"],
+    tags = ["basic"],
+)
+
+cxx_indexer_test(
+    name = "namespace_header",
+    srcs = ["basic/namespace_header.cc"],
+    bundled = True,
+    ignore_dups = True,  # namespace foo has the same documentation in two .hs.
+    tags = ["basic"],
+)
+
+cxx_indexer_test(
+    name = "namespace_vnames",
+    srcs = ["basic/namespace_vnames.cc"],
+    bundled = True,
+    tags = ["basic"],
+)
+
+cxx_indexer_test(
+    name = "nested_name_specifiers",
+    srcs = ["basic/nested_name_specifiers.cc"],
+    tags = ["basic"],
+)
+
+cxx_indexer_test(
+    name = "sizeof_ref",
+    srcs = ["basic/sizeof_ref.c"],
+    std = "gnu99",
+    tags = ["basic"],
+)
+
+cxx_indexer_test(
+    name = "sizeof_typedef_ref",
+    srcs = ["basic/sizeof_typedef_ref.c"],
+    std = "gnu99",
     tags = ["basic"],
 )
 
@@ -590,6 +727,7 @@ cxx_indexer_test(
 
 cxx_indexer_test(
     name = "function_operator_overload_names",
+    size = "small",
     srcs = ["function/function_operator_overload_names.cc"],
     ignore_dups = True,
     tags = ["function"],
@@ -603,21 +741,9 @@ cxx_indexer_test(
 )
 
 cxx_indexer_test(
-    name = "function_operator_parens",
-    srcs = ["function/function_operator_parens.cc"],
-    tags = ["function"],
-)
-
-cxx_indexer_test(
     name = "function_operator_parens_overload_call",
     srcs = ["function/function_operator_parens_overload_call.cc"],
     ignore_dups = True,
-    tags = ["function"],
-)
-
-cxx_indexer_test(
-    name = "function_operator_parens_overload",
-    srcs = ["function/function_operator_parens_overload.cc"],
     tags = ["function"],
 )
 
@@ -708,6 +834,13 @@ cxx_indexer_test(
 cxx_indexer_test(
     name = "docs_block_multiline",
     srcs = ["docs/docs_block_multiline.cc"],
+    tags = ["docs"],
+)
+
+cxx_indexer_test(
+    name = "docs_doc_var",
+    srcs = ["docs/docs_doc_var.cc"],
+    goal_prefix = "///-",
     tags = ["docs"],
 )
 
@@ -807,6 +940,60 @@ cxx_indexer_test(
 )
 
 cxx_indexer_test(
+    name = "docs_template_alias",
+    srcs = ["docs/docs_template_alias.cc"],
+    tags = ["docs"],
+)
+
+cxx_indexer_test(
+    name = "docs_template_function",
+    srcs = ["docs/docs_template_function.cc"],
+    tags = ["docs"],
+)
+
+cxx_indexer_test(
+    name = "docs_template_function_spec",
+    srcs = ["docs/docs_template_function_spec.cc"],
+    tags = ["docs"],
+)
+
+cxx_indexer_test(
+    name = "docs_template_record",
+    srcs = ["docs/docs_template_record.cc"],
+    tags = ["docs"],
+)
+
+cxx_indexer_test(
+    name = "docs_template_var",
+    srcs = ["docs/docs_template_var.cc"],
+    tags = ["docs"],
+)
+
+cxx_indexer_test(
+    name = "docs_template_partial_spec_record",
+    srcs = ["docs/docs_template_partial_spec_record.cc"],
+    tags = ["docs"],
+)
+
+cxx_indexer_test(
+    name = "docs_template_partial_spec_var",
+    srcs = ["docs/docs_template_partial_spec_record.cc"],
+    tags = ["docs"],
+)
+
+cxx_indexer_test(
+    name = "docs_template_total_spec_record",
+    srcs = ["docs/docs_template_total_spec_record.cc"],
+    tags = ["docs"],
+)
+
+cxx_indexer_test(
+    name = "docs_template_total_spec_var",
+    srcs = ["docs/docs_template_total_spec_var.cc"],
+    tags = ["docs"],
+)
+
+cxx_indexer_test(
     name = "docs_visibility",
     srcs = ["docs/docs_visibility.cc"],
     tags = ["docs"],
@@ -823,6 +1010,14 @@ cxx_indexer_test(
     ignore_dups = True,
     tags = ["libraries"],
     deps = ["libraries/flags_bool.h"] + glob(["libraries/gflags*.h"]),
+)
+
+cxx_indexer_test(
+    name = "flags_bool_stdbool",
+    srcs = ["libraries/flags_bool_stdbool.cc"],
+    ignore_dups = True,
+    tags = ["libraries"],
+    deps = ["libraries/stdbool.h"] + glob(["libraries/gflags*.h"]),
 )
 
 cxx_indexer_test(
@@ -891,6 +1086,18 @@ cxx_indexer_test(
 )
 
 cxx_indexer_test(
+    name = "gnu_anon_struct",
+    srcs = ["rec/rec_gnu_anon_struct.cc"],
+    tags = ["rec"],
+)
+
+cxx_indexer_test(
+    name = "rec_anon_union",
+    srcs = ["rec/rec_anon_union.cc"],
+    tags = ["rec"],
+)
+
+cxx_indexer_test(
     name = "rec_class",
     srcs = ["rec/rec_class.cc"],
     tags = ["rec"],
@@ -942,6 +1149,24 @@ cxx_indexer_test(
 )
 
 cxx_indexer_test(
+    name = "rec_implicit_anchors",
+    srcs = ["rec/rec_implicit_anchors.cc"],
+    tags = ["rec"],
+)
+
+cxx_indexer_test(
+    name = "rec_implicit_anchors_ctor",
+    srcs = ["rec/rec_implicit_anchors_ctor.cc"],
+    tags = ["rec"],
+)
+
+cxx_indexer_test(
+    name = "rec_override",
+    srcs = ["rec/rec_override.cc"],
+    tags = ["rec"],
+)
+
+cxx_indexer_test(
     name = "rec_struct_c99",
     srcs = ["rec/rec_struct.c"],
     std = "c99",
@@ -975,6 +1200,18 @@ cxx_indexer_test(
 test_suite(
     name = "indexer_rec",
     tags = ["rec"],
+)
+
+cxx_indexer_test(
+    name = "template_alias",
+    srcs = ["template/template_alias.cc"],
+    tags = ["template"],
+)
+
+cxx_indexer_test(
+    name = "template_type_alias_param",
+    srcs = ["template/template_type_alias_param.cc"],
+    tags = ["template"],
 )
 
 cxx_indexer_test(
@@ -1042,6 +1279,10 @@ cxx_indexer_test(
 cxx_indexer_test(
     name = "template_class_inst_implicit",
     srcs = ["template/template_class_inst_implicit.cc"],
+    ignore_dups = True,  # Type alias alias inside a class template gets the
+                         # same documentation text.
+                         # TODO(zarko): Should the two aliases be distinctly
+                         # named?
     tags = ["template"],
 )
 
@@ -1054,6 +1295,12 @@ cxx_indexer_test(
 cxx_indexer_test(
     name = "template_class_inst_vs_spec",
     srcs = ["template/template_class_inst_vs_spec.cc"],
+    tags = ["template"],
+)
+
+cxx_indexer_test(
+    name = "template_class_ref",
+    srcs = ["template/template_class_ref.cc"],
     tags = ["template"],
 )
 
@@ -1105,6 +1352,12 @@ cxx_indexer_test(
 )
 
 cxx_indexer_test(
+    name = "template_dependent_sized_array",
+    srcs = ["template/template_dependent_sized_array.cc"],
+    tags = ["template"],
+)
+
+cxx_indexer_test(
     name = "template_depexpr_field_ref",
     srcs = ["template/template_depexpr_field_ref.cc"],
     tags = ["template"],
@@ -1137,12 +1390,46 @@ cxx_indexer_test(
 cxx_indexer_test(
     name = "template_depname_inst_class",
     srcs = ["template/template_depname_inst_class.cc"],
+    ignore_unimplemented = True,
     tags = ["template"],
 )
 
 cxx_indexer_test(
     name = "template_depname_path_graph",
     srcs = ["template/template_depname_path_graph.cc"],
+    tags = ["template"],
+)
+
+cxx_indexer_test(
+    name = "template_drop_redundant_wraiths_off",
+    srcs = ["template/template_drop_redundant_wraiths.cc"],
+    experimental_drop_instantiation_independent_data = False,
+    ignore_dups = True,
+    tags = ["template"],
+)
+
+cxx_indexer_test(
+    name = "template_drop_redundant_wraiths_on",
+    srcs = ["template/template_drop_redundant_wraiths.cc"],
+    experimental_drop_instantiation_independent_data = True,
+    ignore_dups = True,
+    tags = ["template"],
+)
+
+cxx_indexer_test(
+    name = "template_drop_redundant_wraiths_off_expect_fail",
+    srcs = ["template/template_drop_redundant_wraiths_expect_fail.cc"],
+    experimental_drop_instantiation_independent_data = False,
+    ignore_dups = True,
+    tags = ["template"],
+)
+
+cxx_indexer_test(
+    name = "template_drop_redundant_wraiths_on_expect_fail",
+    srcs = ["template/template_drop_redundant_wraiths_expect_fail.cc"],
+    expect_fail_verify = True,
+    experimental_drop_instantiation_independent_data = True,
+    ignore_dups = True,
     tags = ["template"],
 )
 
@@ -1256,6 +1543,12 @@ cxx_indexer_test(
 )
 
 cxx_indexer_test(
+    name = "template_incomplete_array",
+    srcs = ["template/template_incomplete_array.cc"],
+    tags = ["template"],
+)
+
+cxx_indexer_test(
     name = "template_instance_type_from_class",
     srcs = ["template/template_instance_type_from_class.cc"],
     tags = ["template"],
@@ -1264,6 +1557,34 @@ cxx_indexer_test(
 cxx_indexer_test(
     name = "template_multilevel_argument",
     srcs = ["template/template_multilevel_argument.cc"],
+    tags = ["template"],
+)
+
+cxx_indexer_test(
+    name = "template_pack_fn_decl",
+    srcs = ["template/template_pack_fn_decl.cc"],
+    ignore_dups = True,
+    tags = ["template"],
+)
+
+cxx_indexer_test(
+    name = "template_pack_fn_mono_call",
+    srcs = ["template/template_pack_fn_mono_call.cc"],
+    ignore_dups = True,
+    tags = ["template"],
+)
+
+cxx_indexer_test(
+    name = "template_pack_fn_pack_call",
+    srcs = ["template/template_pack_fn_pack_call.cc"],
+    ignore_dups = True,
+    tags = ["template"],
+)
+
+cxx_indexer_test(
+    name = "template_pack_rec_pack_call",
+    srcs = ["template/template_pack_rec_pack_call.cc"],
+    ignore_dups = True,
     tags = ["template"],
 )
 
@@ -1294,6 +1615,12 @@ cxx_indexer_test(
 cxx_indexer_test(
     name = "template_ps_twovar_decl",
     srcs = ["template/template_ps_twovar_decl.cc"],
+    tags = ["template"],
+)
+
+cxx_indexer_test(
+    name = "template_rec_override",
+    srcs = ["template/template_rec_override.cc"],
     tags = ["template"],
 )
 
@@ -1391,6 +1718,7 @@ cxx_indexer_test(
 cxx_indexer_test(
     name = "template_var_constexpr",
     srcs = ["template/template_var_constexpr.cc"],
+    ignore_dups = True,
     std = "c++14",
     tags = ["template"],
 )
@@ -1398,20 +1726,4 @@ cxx_indexer_test(
 test_suite(
     name = "indexer_template",
     tags = ["template"],
-)
-
-# Required by cxx_indexer_test macro.
-sh_library(
-    name = "one_case",
-    srcs = ["one_case.sh"],
-    data = [
-        "//kythe/cxx/indexer/cxx:indexer",
-        "//kythe/cxx/verifier",
-    ],
-)
-
-sh_binary(
-    name = "run_case",
-    srcs = ["run_case.sh"],
-    deps = [":one_case"],
 )

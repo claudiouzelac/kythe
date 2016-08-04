@@ -16,16 +16,17 @@
 
 // This file uses the Clang style conventions.
 
-#include "GraphObserver.h"
 #include "IndexerPPCallbacks.h"
+#include "GraphObserver.h"
 
-#include "clang/Basic/SourceManager.h"
+#include "glog/logging.h"
+#include "kythe/cxx/common/path_utils.h"
 #include "clang/Basic/FileManager.h"
+#include "clang/Basic/SourceManager.h"
 #include "clang/Lex/PPCallbacks.h"
 #include "clang/Lex/Preprocessor.h"
-#include "kythe/cxx/common/path_utils.h"
-#include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/raw_ostream.h"
 
 // TODO(zarko): IndexerASTHooks::RangeInCurrentContext should query the macro
 // context. IndexerPPCallbacks doesn't need to query for the template context,
@@ -44,8 +45,8 @@
 namespace kythe {
 
 IndexerPPCallbacks::IndexerPPCallbacks(clang::Preprocessor &PP,
-                                       GraphObserver &GO)
-    : Preprocessor(PP), Observer(GO) {
+                                       GraphObserver &GO, enum Verbosity V)
+    : Preprocessor(PP), Observer(GO), Verbosity(V) {
   class MetadataPragmaHandlerWrapper : public clang::PragmaHandler {
   public:
     MetadataPragmaHandlerWrapper(IndexerPPCallbacks *context)
@@ -163,21 +164,23 @@ void IndexerPPCallbacks::MacroExpands(const clang::Token &Token,
   const clang::MacroInfo &Info = *Macro.getMacroInfo();
   GraphObserver::NodeId MacroId = BuildNodeIdForMacro(Token, Info);
   if (!Range.getBegin().isFileID() || !Range.getEnd().isFileID()) {
-    auto NewBegin =
-        Observer.getSourceManager()->getExpansionLoc(Range.getBegin());
-    if (!NewBegin.isFileID()) {
-      return;
+    if (Verbosity) {
+      auto NewBegin =
+          Observer.getSourceManager()->getExpansionLoc(Range.getBegin());
+      if (!NewBegin.isFileID()) {
+        return;
+      }
+      Range = clang::SourceRange(NewBegin,
+                                 clang::Lexer::getLocForEndOfToken(
+                                     NewBegin, 0, /* offset from token end */
+                                     *Observer.getSourceManager(),
+                                     *Observer.getLangOptions()));
+      if (Range.isInvalid()) {
+        return;
+      }
+      Observer.recordIndirectlyExpandsRange(RangeInCurrentContext(Range),
+                                            MacroId);
     }
-    Range = clang::SourceRange(NewBegin,
-                               clang::Lexer::getLocForEndOfToken(
-                                   NewBegin, 0, /* offset from end of token */
-                                   *Observer.getSourceManager(),
-                                   *Observer.getLangOptions()));
-    if (Range.isInvalid()) {
-      return;
-    }
-    Observer.recordIndirectlyExpandsRange(RangeInCurrentContext(Range),
-                                          MacroId);
   } else {
     Observer.recordExpandsRange(RangeForTokenInCurrentContext(Token), MacroId);
   }
@@ -245,7 +248,7 @@ void IndexerPPCallbacks::AddMacroReferenceIfDefined(
     // they have the names of tokens, rather than following the Standard's
     // formal phases of translation which would have them all be just
     // identifiers during preprocessing.
-    assert(0 && "No IdentifierInfo in AddMacroReferenceIfDefined.");
+    LOG(FATAL) << "No IdentifierInfo in AddMacroReferenceIfDefined.";
   }
 }
 
@@ -259,7 +262,7 @@ void IndexerPPCallbacks::AddReferenceToMacro(const clang::Token &MacroNameToken,
 
 GraphObserver::NameId
 IndexerPPCallbacks::BuildNameIdForMacro(const clang::Token &Spelling) {
-  assert(Spelling.getIdentifierInfo() && "Macro spelling lacks IdentifierInfo");
+  CHECK(Spelling.getIdentifierInfo()) << "Macro spelling lacks IdentifierInfo";
   GraphObserver::NameId Id;
   Id.EqClass = GraphObserver::NameId::NameEqClass::Macro;
   Id.Path = Spelling.getIdentifierInfo()->getName();

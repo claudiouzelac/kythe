@@ -1,4 +1,4 @@
-#!/bin/sh -e
+#!/bin/bash -e
 
 # Copyright 2015 Google Inc. All rights reserved.
 #
@@ -19,6 +19,8 @@
 #
 # Usage: linter.sh <file>
 #
+# Optionally uses shellcheck if it is found on PATH along with jq.
+#
 # Arcanist Documentation:
 #   https://secure.phabricator.com/book/phabricator/article/arcanist_lint_script_and_regex/
 
@@ -27,18 +29,23 @@ readonly name="$(basename "$1")"
 readonly dir="$(dirname "$1")"
 
 case $file in
-  WORKSPACE|third_party/*|tools/*|*.md|BUILD|*/BUILD|*/testdata/*|*.yaml|*.json|*.html|*.pb.go|.arclint|.gitignore|*/.gitignore|.arcconfig|*/__phutil_*|*.bzl|.kythe|kythe/web/site/*)
+  AUTHORS|CONTRIBUTORS|WORKSPACE|third_party/*|tools/*|*.md|BUILD|*/BUILD|*/testdata/*|*.yaml|*.json|*.html|*.pb.go|.arclint|.gitignore|*/.gitignore|.arcconfig|*/__phutil_*|*.bzl|.kythe|kythe/web/site/*)
     ;; # skip copyright checks
+  *.sh|*.bash)
+    if command -v shellcheck &>/dev/null && command -v jq &>/dev/null; then
+      shellcheck -f json "$file" | \
+        jq -r '.[] | "shellcheck::" + (if .level == "info" then "advice" else .level end) + ":" + (.line | tostring) + " " + .message'
+    fi ;;
   *)
-    if ! grep -Pq 'Copyright 201[45] Google Inc. All rights reserved.' "$file"; then
-      echo 'copyright header::error: File missing copyright header'
+    if ! grep -q 'Copyright 201[4-9] Google Inc. All rights reserved.' "$file"; then
+      echo 'copyright header::error:1 File missing copyright header'
     fi ;;
 esac
 
 # Ensure filenames/paths do not clash on case-insensitive file systems.
 if grep -q [A-Z] <<<"$dir"; then
-  echo "case-insensitivity::error: $dir directory contains an uppercase letter"
+  echo "case-insensitivity::error:1 $dir directory contains an uppercase letter"
 fi
-if [[ $(find "$dir" -maxdepth 1 -iname "$name" | wc -l) -gt 1 ]]; then
-  echo "case-insensitivity::error: $name filename clashes on case-insensitive file systems"
+if [[ $(find "$dir" -maxdepth 0 -iname "$name" | wc -l) -gt 1 ]]; then
+  echo "case-insensitivity::error:1 $name filename clashes on case-insensitive file systems"
 fi

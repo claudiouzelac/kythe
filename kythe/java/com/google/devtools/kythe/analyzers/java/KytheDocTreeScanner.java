@@ -16,8 +16,7 @@
 
 package com.google.devtools.kythe.analyzers.java;
 
-import com.google.common.collect.Lists;
-
+import com.google.devtools.kythe.analyzers.base.EntrySet;
 import com.sun.source.doctree.ReferenceTree;
 import com.sun.source.util.DocTreeScanner;
 import com.sun.tools.javac.code.Symbol;
@@ -29,23 +28,47 @@ import com.sun.tools.javac.tree.JCTree;
 import com.sun.tools.javac.tree.JCTree.JCFieldAccess;
 import com.sun.tools.javac.tree.JCTree.JCIdent;
 import com.sun.tools.javac.util.Name;
-
+import java.util.ArrayList;
+import java.util.LinkedList;
 import java.util.List;
 
 public class KytheDocTreeScanner extends DocTreeScanner<Void, DCDocComment> {
   private final KytheTreeScanner treeScanner;
   private final DocCommentTable table;
+  private final List<MiniAnchor<Symbol>> miniAnchors;
 
   public KytheDocTreeScanner(KytheTreeScanner treeScanner, DocCommentTable table) {
     this.treeScanner = treeScanner;
     this.table = table;
+    this.miniAnchors = new ArrayList<>();
   }
 
-  public void visitDocComment(JCTree tree) {
-    DCDocComment doc = table.getCommentTree(tree);
-    if (doc != null) {
-      doc.accept(this, doc);
+  public boolean visitDocComment(JCTree tree, EntrySet node) {
+    final DCDocComment doc = table.getCommentTree(tree);
+    if (doc == null) {
+      return false;
     }
+
+    miniAnchors.clear();
+    doc.accept(this, doc);
+    int startChar = (int) doc.getSourcePosition(doc);
+
+    String bracketed =
+        MiniAnchor.bracket(
+            doc.comment.getText(),
+            new MiniAnchor.PositionTransform() {
+              @Override
+              public int transform(int pos) {
+                return doc.comment.getSourcePos(pos);
+              }
+            },
+            miniAnchors);
+    List<Symbol> anchoredTo = new ArrayList<>(miniAnchors.size());
+    for (MiniAnchor<Symbol> miniAnchor : miniAnchors) {
+      anchoredTo.add(miniAnchor.getAnchoredTo());
+    }
+    treeScanner.emitDoc(bracketed, anchoredTo, node);
+    return treeScanner.emitCommentsOnLine(treeScanner.charToLine(startChar), node);
   }
 
   @Override
@@ -62,6 +85,7 @@ public class KytheDocTreeScanner extends DocTreeScanner<Void, DCDocComment> {
     int endPos = ref.getEndPos(doc);
 
     treeScanner.emitDocReference(sym, startPos, endPos);
+    miniAnchors.add(new MiniAnchor<Symbol>(sym, startPos, endPos));
 
     return null;
   }
@@ -83,10 +107,10 @@ public class KytheDocTreeScanner extends DocTreeScanner<Void, DCDocComment> {
     if (syms.classes.containsKey(name)) {
       return syms.classes.get(name);
     } else if (!name.toString().matches("[$.#]")) {
-      List<Name> matches = Lists.newLinkedList();
+      List<Name> matches = new LinkedList<>();
       for (Name clsName : syms.classes.keySet()) {
         String[] parts = clsName.toString().split("[$.]");
-        if (parts[parts.length-1].equals(name.toString())) {
+        if (parts[parts.length - 1].equals(name.toString())) {
           matches.add(clsName);
         }
       }
